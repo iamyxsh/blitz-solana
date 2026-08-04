@@ -1,0 +1,10 @@
+[package]
+name = "mb-constants"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "mb_constants"
+path = "src/lib.rs"

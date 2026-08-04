@@ -1,0 +1,33 @@
+[package]
+name = "magicblock-task-scheduler"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+bincode = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+magicblock-core = { workspace = true }
+magicblock-config = { workspace = true }
+magicblock-ledger = { workspace = true }
+magicblock-program = { workspace = true }
+rusqlite = { workspace = true }
+solana-instruction = { workspace = true }
+solana-message = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-rpc-client = { workspace = true }
+solana-rpc-client-api = { workspace = true }
+solana-signature = { workspace = true }
+solana-transaction = { workspace = true }
+solana-transaction-error = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+serial_test = { workspace = true }

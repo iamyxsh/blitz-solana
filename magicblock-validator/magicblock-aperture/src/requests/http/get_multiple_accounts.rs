@@ -1,0 +1,57 @@
+use std::sync::{atomic::AtomicU64, Arc};
+
+use solana_rpc_client_api::config::RpcAccountInfoConfig;
+
+use super::prelude::*;
+
+impl HttpDispatcher {
+    /// Handles the `getMultipleAccounts` RPC request.
+    ///
+    /// Fetches a batch of accounts by their public keys. The encoding for
+    /// accounts can be specified via an optional configuration object.
+    ///
+    /// The returned list has the same length as the input `pubkeys`
+    /// list, with `null` entries for accounts that are not found.
+    pub(crate) async fn get_multiple_accounts(
+        &self,
+        request: &mut JsonRequest,
+        remote_account_claims: Arc<AtomicU64>,
+    ) -> HandlerResult {
+        let (pubkeys, config) = parse_params!(
+            request.params()?,
+            Vec<Serde32Bytes>,
+            RpcAccountInfoConfig
+        );
+
+        let pubkeys: Vec<Serde32Bytes> = some_or_err!(pubkeys);
+        let pubkeys: Vec<Pubkey> =
+            pubkeys.into_iter().map(Into::into).collect();
+
+        let config = config.unwrap_or_default();
+        let encoding = config.encoding.unwrap_or(UiAccountEncoding::Base58);
+        let slice = config.data_slice;
+
+        let fetch_context =
+            Self::rpc_get_multiple_accounts_context(remote_account_claims);
+        let accounts = pubkeys
+            .iter()
+            .zip(
+                self.read_accounts_with_ensure(&pubkeys, fetch_context)
+                    .await
+                    .into_iter(),
+            )
+            .map(|(pubkey, acc)| {
+                acc.filter(|account| {
+                    !Self::account_should_render_as_null(account)
+                })
+                .map(|account| {
+                    LockedAccount::new(*pubkey, account)
+                        .ui_encode(encoding, slice)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let slot = self.blocks.block_height();
+        Ok(ResponsePayload::encode(&request.id, accounts, slot))
+    }
+}

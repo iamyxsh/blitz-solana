@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["magicblock-validator"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+mb-constants = { path = "crates/constants" }
+
+ed25519-dalek = "2"
+sha2 = "0.10"
+thiserror = "2"
+hex = "0.4"
+serde_json = "1"
+bs58 = "0.5"

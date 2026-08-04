@@ -1,0 +1,24 @@
+pub type Slot = u64;
+/// Ordinal position of a transaction within a slot.
+pub type TransactionIndex = u32;
+
+/// A macro that panics when running a debug build and logs the panic message
+/// instead when running in release mode.
+#[macro_export]
+macro_rules! debug_panic {
+    ($($arg:tt)*) => (
+        if cfg!(debug_assertions) {
+            panic!($($arg)*);
+        } else {
+            ::tracing::error!($($arg)*);
+        }
+    )
+}
+
+pub mod coordination_mode;
+pub mod intent;
+pub mod link;
+pub mod logger;
+pub mod tls;
+pub mod token_programs;
+pub mod traits;

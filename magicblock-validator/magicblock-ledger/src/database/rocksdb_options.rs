@@ -1,0 +1,131 @@
+use rocksdb::{AsRawPtr, Options};
+
+use super::options::AccessType;
+
+/// Owned reference to this DB's rate limiter, kept so shutdown can lift the
+/// throttle for the final memtable flush.
+#[derive(Debug)]
+pub(crate) struct RateLimiterHandle(*mut librocksdb_sys::rocksdb_ratelimiter_t);
+
+// SAFETY: the underlying RateLimiter is internally synchronized;
+// SetBytesPerSecond and destroy are safe from any thread.
+unsafe impl Send for RateLimiterHandle {}
+unsafe impl Sync for RateLimiterHandle {}
+
+impl RateLimiterHandle {
+    /// Raises the background IO rate limit to effectively unlimited. Once
+    /// compactions are stopped at shutdown, throttling only stretches the
+    /// final flush into restart downtime.
+    pub(crate) fn lift(&self) {
+        unsafe {
+            librocksdb_sys::rocksdb_ratelimiter_set_bytes_per_second(
+                self.0,
+                i64::MAX,
+            );
+        }
+    }
+}
+
+impl Drop for RateLimiterHandle {
+    fn drop(&mut self) {
+        // Drops our shared_ptr reference; the DB keeps its own while open.
+        unsafe { librocksdb_sys::rocksdb_ratelimiter_destroy(self.0) }
+    }
+}
+
+pub fn get_rocksdb_options(
+    access_type: &AccessType,
+) -> (Options, RateLimiterHandle) {
+    let mut options = Options::default();
+
+    // Create missing items to support a clean start
+    options.create_if_missing(true);
+    options.create_missing_column_families(true);
+
+    // Background thread prioritization: give flushes more threads, limit compaction threads (low-priority)
+    let mut env = rocksdb::Env::new().unwrap();
+    let cpus_env = num_cpus::get() as i32;
+
+    // Bottom-priority are used for bottommost compactions. Keep it minimal - 1
+    let bottom_pri = 1;
+    env.set_bottom_priority_background_threads(bottom_pri);
+    // High-priority threads are used for flush. Keep a few to avoid memtable flush backlog.
+    let high_pri = cpus_env.clamp(2, 4);
+    env.set_high_priority_background_threads(high_pri);
+    options.set_env(&env);
+
+    // For every job RocksDB picks a thread from available pools
+    // Here we select ceiling so RocksDB doesn't use all of HIGH + LOW + BOTTOM threads
+    // By default num of threads in LOW is 1
+    let max_jobs = std::cmp::max(high_pri + 1, bottom_pri);
+    options.set_max_background_jobs(max_jobs);
+    options.set_max_subcompactions(high_pri as u32);
+
+    // Bound WAL size
+    options.set_max_total_wal_size(4 * 1024 * 1024 * 1024);
+
+    if should_disable_auto_compactions(access_type) {
+        options.set_disable_auto_compactions(true);
+    }
+
+    // Bound open files so DB::Open does not eagerly open every SST file.
+    options.set_max_open_files(4096);
+
+    // Smooth IO
+    options.set_bytes_per_sync(1024 * 1024);
+    options.set_wal_bytes_per_sync(1024 * 1024);
+
+    // Favor concurrency on the write path
+    options.set_allow_concurrent_memtable_write(true);
+    options.set_enable_pipelined_write(true);
+    options.set_enable_write_thread_adaptive_yield(true);
+
+    // Use direct IO for compaction/flush to avoid page cache contention
+    options.set_use_direct_reads(true);
+    options.set_use_direct_io_for_flush_and_compaction(true);
+    options.set_compaction_readahead_size(4 * 1024 * 1024);
+
+    // Throttle background compaction/flush IO to avoid starving foreground ops.
+    // This also caps the full-column manual compactions the LedgerTruncator
+    // triggers each truncation cycle (a rewrite of the largest columns): at
+    // 128 MiB/s those saturated the ledger disk at ~275 MB/s combined R+W for
+    // over an hour per cycle. 48 MiB/s keeps combined disk throughput under
+    // ~100 MB/s; the same rewrite just spreads over a longer window.
+    // kAllIo mode is required: the default limiter only charges writes, and
+    // truncation compactions are read-dominated (most input is tombstoned and
+    // discarded, so almost nothing is written back). With kWritesOnly the
+    // limiter never engages and compaction reads run at full disk speed.
+    // The safe wrapper only exposes kWritesOnly, so go through the C API.
+    // RateLimiter parameters: rate_bytes_per_sec, refill_period_us, fairness
+    const RATE_LIMITER_MODE_ALL_IO: std::ffi::c_int = 2; // RateLimiter::Mode::kAllIo
+    let rate_limiter = unsafe {
+        let ratelimiter = librocksdb_sys::rocksdb_ratelimiter_create_with_mode(
+            48 * 1024 * 1024,
+            100 * 1000,
+            10,
+            RATE_LIMITER_MODE_ALL_IO,
+            false,
+        );
+        librocksdb_sys::rocksdb_options_set_ratelimiter(
+            options.as_raw_ptr(),
+            ratelimiter,
+        );
+        // Keep our reference instead of destroying it so shutdown can lift
+        // the throttle for this DB's final flush.
+        RateLimiterHandle(ratelimiter)
+    };
+
+    // Dynamic level bytes is a good default to balance levels
+    options.set_level_compaction_dynamic_level_bytes(true);
+    options.set_report_bg_io_stats(true);
+
+    (options, rate_limiter)
+}
+
+// Returns whether automatic compactions should be disabled for the entire
+// database based upon the given access type.
+pub fn should_disable_auto_compactions(access_type: &AccessType) -> bool {
+    // Leave automatic compactions enabled (do not disable) in Primary mode;
+    // disable in all other modes to prevent accidental cleaning
+    !matches!(access_type, AccessType::Primary)
+}
