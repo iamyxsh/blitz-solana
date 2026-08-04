@@ -3791,6 +3791,7 @@ dependencies = [
 name = "magicblock-core"
 version = "0.13.19"
 dependencies = [
+ "async-trait",
  "bincode",
  "bytes",
  "console-subscriber",
@@ -4018,6 +4019,7 @@ dependencies = [
 name = "magicblock-receipts"
 version = "0.13.19"
 dependencies = [
+ "async-trait",
  "bs58",
  "bytes",
  "ed25519-dalek 2.2.0",

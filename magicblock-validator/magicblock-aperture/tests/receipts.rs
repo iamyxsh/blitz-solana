@@ -420,3 +420,76 @@ async fn get_receipt_finds_a_receipt_by_transaction_signature() {
         "an unknown signature is null, not an error"
     );
 }
+
+/// The rule that turns "no receipt" into evidence.
+///
+/// Internal producers — the account cloner, task scheduler, undelegation and
+/// committor services — reach the scheduler directly rather than through the
+/// RPC. If they were exempt, an operator could inject its own transaction and
+/// its absence from the log would mean nothing.
+#[tokio::test]
+async fn a_transaction_that_bypasses_the_rpc_is_still_receipted() {
+    let env = RpcTestEnv::new().await;
+    let txn = env.build_transfer_txn();
+    let signature = txn.signatures[0];
+
+    env.execution
+        .execute_transaction(txn)
+        .await
+        .expect("internal execution should succeed");
+
+    let (seq, _, bytes) = env
+        .execution
+        .ledger
+        .read_receipt_by_signature(signature)
+        .unwrap()
+        .expect("a transaction scheduled internally must still be receipted");
+
+    assert_eq!(seq, 0);
+    let signed = mb_receipt::SignedReceipt::from_bytes(&bytes).unwrap();
+    assert!(signed.verify(&env.operator).is_ok());
+    assert_eq!(signed.receipt.tx_sig, signature.as_ref());
+}
+
+/// The RPC path stamps at ingress and must then opt out of stamping again on
+/// the way to the scheduler. A second receipt would break the one-to-one
+/// mapping between sequence numbers and transactions.
+#[tokio::test]
+async fn the_rpc_path_issues_exactly_one_receipt_per_transaction() {
+    let env = RpcTestEnv::new().await;
+    for _ in 0..3 {
+        env.send_transaction_ok(&env.build_transfer_txn()).await;
+    }
+
+    assert_eq!(env.execution.ledger.count_receipts().unwrap(), 3);
+}
+
+/// Client and operator transactions share one sequence and one chain, which
+/// is what lets a watchtower reason about their relative order at all.
+#[tokio::test]
+async fn internal_and_client_transactions_share_one_chain() {
+    let env = RpcTestEnv::new().await;
+
+    let (_, from_rpc) =
+        env.send_transaction_ok(&env.build_transfer_txn()).await;
+    env.execution
+        .execute_transaction(env.build_transfer_txn())
+        .await
+        .expect("internal execution should succeed");
+
+    let log: Vec<mb_receipt::SignedReceipt> = env
+        .execution
+        .ledger
+        .iter_receipts(0)
+        .unwrap()
+        .map(|(_, _, bytes)| {
+            mb_receipt::SignedReceipt::from_bytes(&bytes).unwrap()
+        })
+        .collect();
+
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0], from_rpc);
+    assert_eq!(log[1].receipt.seq, 1);
+    assert_eq!(log[1].receipt.prev_receipt_hash, log[0].receipt_hash());
+    assert!(log[1].verify(&env.operator).is_ok());
+}

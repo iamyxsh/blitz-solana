@@ -260,12 +260,19 @@ impl RpcTestEnv {
             featureset: Default::default(),
             blocktime: BLOCK_TIME_MS,
         };
+        let receipts = receipts(&execution.ledger);
+        // Mirrors the validator: every producer that reaches the scheduler
+        // through this handle is receipted, not just the RPC path.
+        execution
+            .transaction_scheduler
+            .install_stamper(Arc::new(receipts.clone()));
+
         let state = SharedState::new(
             node_context,
             execution.accountsdb.clone(),
             execution.ledger.clone(),
             chainlink(&execution.accountsdb),
-            receipts(&execution.ledger),
+            receipts,
         );
         let cancel = CancellationToken::new();
         let config = ApertureConfig {

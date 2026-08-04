@@ -93,6 +93,7 @@ pub fn link(
     let transaction_scheduler = TransactionSchedulerHandle {
         tx: txn_to_process_tx,
         pause_permit: pause_permit.clone(),
+        stamper: Default::default(),
     };
 
     // Bundle the respective channel ends for the dispatch side.

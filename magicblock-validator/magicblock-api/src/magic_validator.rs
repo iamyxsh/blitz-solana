@@ -416,6 +416,13 @@ impl MagicValidator {
                 Box::new(move || block.load().slot),
             )
         };
+        // Installed before any internal producer is constructed, so the
+        // cloner, task scheduler, undelegation and committor services all
+        // stamp through the same writer as the RPC path.
+        dispatch
+            .transaction_scheduler
+            .install_stamper(Arc::new(receipts.clone()));
+
         let shared_state = SharedState::new(
             node_context,
             accountsdb.clone(),

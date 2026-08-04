@@ -12,6 +12,7 @@ edition.workspace = true
 console-subscriber = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"] }
 flume = { workspace = true }
+async-trait = { workspace = true }
 bincode = { workspace = true }
 bytes = { workspace = true }
 

@@ -80,9 +80,13 @@ impl HttpDispatcher {
         // or schedule (fire-and-forget) for background processing.
         let scheduled = if config.skip_preflight {
             TRANSACTION_SKIP_PREFLIGHT.inc();
-            self.transactions_scheduler.schedule(transaction).await
+            self.transactions_scheduler
+                .schedule_receipted(transaction)
+                .await
         } else {
-            self.transactions_scheduler.execute(transaction).await
+            self.transactions_scheduler
+                .execute_receipted(transaction)
+                .await
         };
 
         // A transaction the scheduler took holds a position in a block even

@@ -4,6 +4,7 @@ pub mod slot_source;
 pub mod stamper;
 
 mod command;
+mod ingress_stamper;
 mod request;
 mod writer;
 

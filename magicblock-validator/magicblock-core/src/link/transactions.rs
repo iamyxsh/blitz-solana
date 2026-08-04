@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use flume::{Receiver as MpmcReceiver, Sender as MpmcSender};
@@ -20,6 +20,8 @@ use tokio::sync::{
     mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
     oneshot, OwnedSemaphorePermit, Semaphore,
 };
+
+use tracing::{error, warn};
 
 use super::{blocks::BlockHash, replication};
 use crate::{Slot, TransactionIndex};
@@ -52,6 +54,26 @@ pub struct TransactionSchedulerHandle {
     /// Semaphore for coordinating exclusive access with the scheduler.
     /// See [`Self::wait_for_idle`] for usage.
     pub(super) pause_permit: Arc<Semaphore>,
+    /// Issues the ingress-order receipt for every transaction that reaches
+    /// the scheduler through this handle. Shared by every clone, so
+    /// installing it once covers producers that already hold a handle.
+    pub(super) stamper: Arc<OnceLock<Arc<dyn IngressStamper>>>,
+}
+
+/// Assigns and records the ingress-order receipt for one transaction.
+///
+/// Declared here rather than in the receipts crate because the scheduler
+/// handle lives at the bottom of the dependency graph: the implementation
+/// depends on the ledger, which depends on this crate.
+#[async_trait::async_trait]
+pub trait IngressStamper: Send + Sync + 'static {
+    /// Returns the assigned sequence number, or a reason it was refused.
+    async fn stamp(
+        &self,
+        tx_sig: [u8; 64],
+        wire_bytes: Bytes,
+        recent_blockhash: [u8; 32],
+    ) -> Result<u64, String>;
 }
 
 /// The sender half of a one-shot channel used to return the result of a transaction simulation.
@@ -274,7 +296,27 @@ impl TransactionSchedulerHandle {
         &self,
         txn: impl SanitizeableTransaction,
     ) -> TransactionResult<()> {
+        self.schedule_inner(txn, true).await
+    }
+
+    /// As [`Self::schedule`], for a caller that has already obtained a receipt
+    /// for this transaction and must not be issued a second one.
+    pub async fn schedule_receipted(
+        &self,
+        txn: impl SanitizeableTransaction,
+    ) -> TransactionResult<()> {
+        self.schedule_inner(txn, false).await
+    }
+
+    async fn schedule_inner(
+        &self,
+        txn: impl SanitizeableTransaction,
+        stamp: bool,
+    ) -> TransactionResult<()> {
         let (transaction, encoded) = txn.sanitize_with_encoded(true)?;
+        if stamp {
+            self.stamp(&transaction, &encoded).await?;
+        }
         let mode = TransactionProcessingMode::Execution(None);
         let txn = ProcessableTransaction {
             transaction,
@@ -295,7 +337,69 @@ impl TransactionSchedulerHandle {
         txn: impl SanitizeableTransaction,
     ) -> TransactionResult<()> {
         let mode = |tx| TransactionProcessingMode::Execution(Some(tx));
-        self.send(txn, mode).await?
+        self.send(txn, mode, true).await?
+    }
+
+    /// As [`Self::execute`], for a caller that has already obtained a receipt
+    /// for this transaction and must not be issued a second one.
+    pub async fn execute_receipted(
+        &self,
+        txn: impl SanitizeableTransaction,
+    ) -> TransactionResult<()> {
+        let mode = |tx| TransactionProcessingMode::Execution(Some(tx));
+        self.send(txn, mode, false).await?
+    }
+
+    /// Installs the receipt issuer. Only the first call takes effect.
+    ///
+    /// Transactions scheduled before installation are not receipted; the
+    /// validator installs it before constructing any internal producer.
+    pub fn install_stamper(&self, stamper: Arc<dyn IngressStamper>) {
+        if self.stamper.set(stamper).is_err() {
+            warn!("ingress stamper was already installed");
+        }
+    }
+
+    /// Obtains the ingress receipt for a transaction on its way to the
+    /// scheduler.
+    ///
+    /// A refusal stops the transaction: on a receipted validator a
+    /// transaction with no receipt has no business holding a block position.
+    async fn stamp(
+        &self,
+        transaction: &SanitizedTransaction,
+        encoded: &Option<Bytes>,
+    ) -> TransactionResult<()> {
+        let Some(stamper) = self.stamper.get() else {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                warn!("no ingress stamper installed; transactions are unreceipted")
+            });
+            return Ok(());
+        };
+
+        // Internally built transactions may arrive without wire bytes. They
+        // were never signed by a remote client, so re-serializing them here
+        // cannot disagree with anyone else's view of them.
+        let wire_bytes = match encoded {
+            Some(bytes) => bytes.clone(),
+            None => bincode::serialize(&transaction.to_versioned_transaction())
+                .map_err(|_| TransactionError::SanitizeFailure)?
+                .into(),
+        };
+
+        stamper
+            .stamp(
+                (*transaction.signature()).into(),
+                wire_bytes,
+                transaction.message().recent_blockhash().to_bytes(),
+            )
+            .await
+            .map(|_seq| ())
+            .map_err(|error| {
+                error!(%error, "refusing a transaction that could not be receipted");
+                TransactionError::ClusterMaintenance
+            })
     }
 
     /// Submits a transaction for simulation and awaits the detailed simulation result.
@@ -304,7 +408,9 @@ impl TransactionSchedulerHandle {
         txn: impl SanitizeableTransaction,
     ) -> TransactionResult<TransactionSimulationResult> {
         let mode = TransactionProcessingMode::Simulation;
-        self.send(txn, mode).await
+        // Simulations never reach the scheduler as an execution and hold no
+        // block position, so they are never receipted.
+        self.send(txn, mode, false).await
     }
 
     /// Submits a transaction to be replayed against the current accountsdb state.
@@ -377,8 +483,12 @@ impl TransactionSchedulerHandle {
         &self,
         txn: impl SanitizeableTransaction,
         mode: fn(oneshot::Sender<R>) -> TransactionProcessingMode,
+        stamp: bool,
     ) -> TransactionResult<R> {
         let (transaction, encoded) = txn.sanitize_with_encoded(true)?;
+        if stamp {
+            self.stamp(&transaction, &encoded).await?;
+        }
         let (tx, rx) = oneshot::channel();
         let mode = mode(tx);
         let txn = ProcessableTransaction {
