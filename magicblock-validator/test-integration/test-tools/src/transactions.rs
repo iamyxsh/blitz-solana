@@ -49,22 +49,61 @@ pub fn send_instructions_with_payer(
     Ok((sig, tx))
 }
 
+/// The `sendTransaction` result, in either shape this suite talks to.
+///
+/// A base-layer validator answers with a bare signature string; an ephemeral
+/// validator answers with a signature plus its ingress receipt. `untagged`
+/// lets one client handle both without knowing which endpoint it hit.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum SendTransactionResult {
+    Plain(String),
+    Receipted { signature: String },
+}
+
+impl SendTransactionResult {
+    fn signature(self) -> String {
+        match self {
+            Self::Plain(signature) => signature,
+            Self::Receipted { signature } => signature,
+        }
+    }
+}
+
 pub fn send_transaction(
     rpc_client: &RpcClient,
     tx: &mut Transaction,
     signers: &[&Keypair],
     skip_preflight: bool,
 ) -> Result<Signature, client_error::Error> {
+    use std::str::FromStr;
+
+    use solana_rpc_client_api::request::RpcRequest;
+
     let blockhash = rpc_client.get_latest_blockhash()?;
     tx.try_sign(signers, blockhash)?;
-    let sig = rpc_client.send_transaction_with_config(
-        tx,
-        RpcSendTransactionConfig {
-            skip_preflight,
-            ..Default::default()
-        },
+
+    // Encoding left at the server default (base58), matching the typed
+    // client this replaced.
+    let config = RpcSendTransactionConfig {
+        skip_preflight,
+        ..Default::default()
+    };
+    let wire = bincode::serialize(&tx).map_err(|err| {
+        client_error::Error::from(client_error::ErrorKind::Custom(
+            err.to_string(),
+        ))
+    })?;
+    let result: SendTransactionResult = rpc_client.send(
+        RpcRequest::SendTransaction,
+        serde_json::json!([bs58::encode(wire).into_string(), config]),
     )?;
-    Ok(sig)
+
+    Signature::from_str(&result.signature()).map_err(|err| {
+        client_error::Error::from(client_error::ErrorKind::Custom(
+            err.to_string(),
+        ))
+    })
 }
 
 pub fn send_and_confirm_transaction(

@@ -22,11 +22,16 @@ pub const OFF_T_INGRESS_MICROS: usize = OFF_INGRESS_SLOT + LEN_SLOT;
 
 pub const RECEIPT_LEN: usize = OFF_T_INGRESS_MICROS + LEN_MICROS;
 
+pub const LEN_SIGNATURE: usize = 64;
+pub const OFF_SIGNATURE: usize = RECEIPT_LEN;
+pub const SIGNED_RECEIPT_LEN: usize = OFF_SIGNATURE + LEN_SIGNATURE;
+
 pub const ZERO_SIG: [u8; LEN_TX_SIG] = [0u8; LEN_TX_SIG];
 pub const ZERO_PUBKEY: [u8; LEN_PUBKEY] = [0u8; LEN_PUBKEY];
 pub const GENESIS_PREV_HASH: [u8; LEN_HASH] = [0u8; LEN_HASH];
 
 const _: () = assert!(RECEIPT_LEN == 229);
+const _: () = assert!(SIGNED_RECEIPT_LEN == 293);
 
 #[cfg(test)]
 mod tests {

@@ -57,6 +57,7 @@ use magicblock_program::{
     validator::{self, validator_authority},
     TransactionScheduler as ActionTransactionScheduler,
 };
+use magicblock_receipts::{operator_signing_key, ReceiptStamper};
 use magicblock_replicator::{nats::Broker, BrokerSource, ReplicationService};
 use magicblock_services::{
     actions_callback_service::ActionsCallbackService,
@@ -407,11 +408,19 @@ impl MagicValidator {
         let transaction_execution = transaction_scheduler.spawn();
         log_timing("startup", "transaction_execution_spawn", step_start);
 
+        let receipts = {
+            let block = ledger.latest_block().clone();
+            ReceiptStamper::spawn(
+                operator_signing_key(&validator_authority()),
+                Box::new(move || block.load().slot),
+            )
+        };
         let shared_state = SharedState::new(
             node_context,
             accountsdb.clone(),
             ledger.clone(),
             chainlink.clone(),
+            receipts,
         );
         let step_start = Instant::now();
         let (rpc, aperture_events) = prepare_aperture(

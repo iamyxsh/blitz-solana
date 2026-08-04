@@ -33,11 +33,16 @@ async fn test_send_transaction_success() {
         ..Default::default()
     };
 
-    let signature = env
-        .rpc
-        .send_transaction_with_config(&transfer_tx, config)
+    let (signature, receipt) = env
+        .send_transaction(&transfer_tx, config)
         .await
         .expect("send_transaction failed for a valid transaction");
+
+    assert!(
+        receipt.verify(&env.operator).is_ok(),
+        "receipt must verify against the node identity"
+    );
+    assert_eq!(receipt.receipt.tx_sig, signature.as_ref());
 
     let meta = env
         .execution
@@ -95,7 +100,14 @@ async fn test_send_transaction_emits_remote_account_claims_header_zero() {
             .expect("sendTransaction response body should decode"),
     )
     .expect("sendTransaction response body should be valid JSON");
-    assert!(body["result"].is_str(), "response should contain signature");
+    assert!(
+        body["result"]["signature"].is_str(),
+        "response should contain signature"
+    );
+    assert!(
+        body["result"]["receipt"].is_str(),
+        "response should contain receipt"
+    );
 }
 
 /// Verifies the higher-level `send_and_confirm_transaction` method works correctly,
@@ -110,15 +122,17 @@ async fn test_send_and_confirm_transaction_success() {
         ..Default::default()
     };
 
-    let signature = env
-        .rpc
-        .send_and_confirm_transaction_with_spinner_and_config(
-            &transfer_tx,
-            Default::default(),
-            config,
-        )
+    let (signature, _) = env
+        .send_transaction(&transfer_tx, config)
         .await
         .expect("send_and_confirm_transaction failed");
+    // skip_preflight schedules fire-and-forget, so wait for execution rather
+    // than reading the ledger immediately.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while env.execution.get_transaction(signature).is_none() {
+        assert!(Instant::now() < deadline, "transaction never executed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     let meta = env
         .execution
@@ -136,12 +150,10 @@ async fn test_send_transaction_replay_attack() {
     let env = RpcTestEnv::new().await;
     let transfer_tx = env.build_transfer_txn();
 
-    env.rpc
-        .send_transaction(&transfer_tx)
-        .await
-        .expect("first transaction send should have succeeded");
+    env.send_transaction_ok(&transfer_tx).await;
 
-    let replay_result = env.rpc.send_transaction(&transfer_tx).await;
+    let replay_result =
+        env.send_transaction(&transfer_tx, Default::default()).await;
 
     assert!(
         replay_result.is_err(),

@@ -12,6 +12,7 @@ use std::{
     time::Instant,
 };
 
+use base64::{prelude::BASE64_STANDARD, Engine};
 use magicblock_accounts_db::{traits::AccountsBank, AccountsDb};
 use magicblock_aperture::{
     initialize_aperture,
@@ -24,13 +25,20 @@ use magicblock_config::{
 };
 use magicblock_core::{link::accounts::LockedAccount, Slot};
 use magicblock_ledger::LatestBlock;
+use magicblock_receipts::ReceiptStamper;
+use mb_receipt::SignedReceipt;
 use solana_account::{ReadableAccount, WritableAccount};
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_pubsub_client::nonblocking::pubsub_client::PubsubClient;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use solana_rpc_client_api::{
+    client_error::Error as ClientError, config::RpcSendTransactionConfig,
+    request::RpcRequest,
+};
 use solana_signature::Signature;
 use solana_transaction::Transaction;
+use solana_transaction_status::UiTransactionEncoding;
 use test_kit::{
     guinea::{self, GuineaInstruction},
     AccountMeta, ExecutionTestEnv, Instruction, Signer,
@@ -41,6 +49,13 @@ use tokio_util::sync::CancellationToken;
 pub const TOKEN_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 pub const REMOTE_ACCOUNT_CLAIMS_HEADER: &str = "X-MB-Remote-Account-Claims";
+
+/// Mirrors the `sendTransaction` result shape this validator returns.
+#[derive(serde::Deserialize)]
+struct ReceiptedSignature {
+    signature: String,
+    receipt: String,
+}
 
 pub fn remote_account_claims_header(response: &reqwest::Response) -> u64 {
     response
@@ -68,6 +83,20 @@ pub struct RpcTestEnv {
     pub pubsub: PubsubClient,
     /// A handle to the latest block information in the ledger.
     pub block: LatestBlock,
+    /// The key every receipt this node issues must verify against.
+    pub operator: ed25519_dalek::VerifyingKey,
+}
+
+/// The operator identity used by the test node. Fixed so assertions can
+/// verify receipts without reaching into the server.
+pub const OPERATOR_SECRET: [u8; 32] = [0x07; 32];
+
+fn receipts(ledger: &Arc<magicblock_ledger::Ledger>) -> ReceiptStamper {
+    let block = ledger.latest_block().clone();
+    ReceiptStamper::spawn(
+        ed25519_dalek::SigningKey::from_bytes(&OPERATOR_SECRET),
+        Box::new(move || block.load().slot),
+    )
 }
 
 fn chainlink(accounts_db: &Arc<AccountsDb>) -> Arc<ChainlinkImpl> {
@@ -128,6 +157,7 @@ impl RpcTestEnv {
             execution.accountsdb.clone(),
             execution.ledger.clone(),
             chainlink(&execution.accountsdb),
+            receipts(&execution.ledger),
         );
         let cancel = CancellationToken::new();
         let config = ApertureConfig {
@@ -167,6 +197,8 @@ impl RpcTestEnv {
 
         Self {
             block: execution.ledger.latest_block().clone(),
+            operator: ed25519_dalek::SigningKey::from_bytes(&OPERATOR_SECRET)
+                .verifying_key(),
             execution,
             rpc,
             pubsub,
@@ -331,6 +363,54 @@ impl RpcTestEnv {
         let from = Pubkey::new_unique();
         let to = Pubkey::new_unique();
         self.build_transfer_txn_with_params(from, to, true)
+    }
+
+    /// Sends a transaction and returns its signature together with the
+    /// receipt the node stamped for it.
+    ///
+    /// `sendTransaction` on this validator returns an object rather than a
+    /// bare signature string, so the typed `RpcClient::send_transaction`
+    /// helpers cannot deserialize it.
+    pub async fn send_transaction(
+        &self,
+        txn: &Transaction,
+        config: RpcSendTransactionConfig,
+    ) -> Result<(Signature, SignedReceipt), ClientError> {
+        use std::str::FromStr;
+
+        let wire = bincode::serialize(txn).expect("transaction must encode");
+        let encoded = match config.encoding {
+            Some(UiTransactionEncoding::Base64) => {
+                BASE64_STANDARD.encode(&wire)
+            }
+            _ => bs58::encode(&wire).into_string(),
+        };
+        let response: ReceiptedSignature = self
+            .rpc
+            .send(
+                RpcRequest::SendTransaction,
+                serde_json::json!([encoded, config]),
+            )
+            .await?;
+
+        let signature = Signature::from_str(&response.signature)
+            .expect("node must return a base58 signature");
+        let bytes = BASE64_STANDARD
+            .decode(&response.receipt)
+            .expect("node must return a base64 receipt");
+        let receipt = SignedReceipt::from_bytes(&bytes)
+            .expect("node must return a well-formed receipt");
+        Ok((signature, receipt))
+    }
+
+    /// The common case: send with default config and assert success.
+    pub async fn send_transaction_ok(
+        &self,
+        txn: &Transaction,
+    ) -> (Signature, SignedReceipt) {
+        self.send_transaction(txn, RpcSendTransactionConfig::default())
+            .await
+            .expect("sendTransaction should have succeeded")
     }
 
     /// A generic helper to build a transfer transaction with specific parameters.

@@ -6,6 +6,7 @@ use magicblock_account_cloner::ChainlinkCloner;
 use magicblock_accounts_db::AccountsDb;
 use magicblock_chainlink::{ProdChainlink, ProdInnerChainlink};
 use magicblock_ledger::Ledger;
+use magicblock_receipts::ReceiptStamper;
 use solana_feature_set::FeatureSet;
 use solana_pubkey::Pubkey;
 use subscriptions::SubscriptionsDb;
@@ -38,6 +39,8 @@ pub struct SharedState {
     pub(crate) blocks: Arc<BlocksCache>,
     /// The central manager for all active pub-sub (e.g., WebSocket) subscriptions.
     pub(crate) subscriptions: SubscriptionsDb,
+    /// Assigns and signs the ingress-order receipt for every transaction.
+    pub(crate) receipts: ReceiptStamper,
 }
 
 /// Holds the core configuration and runtime parameters that define the node's operational context.
@@ -68,6 +71,7 @@ impl SharedState {
         accountsdb: Arc<AccountsDb>,
         ledger: Arc<Ledger>,
         chainlink: Arc<ChainlinkImpl>,
+        receipts: ReceiptStamper,
     ) -> Self {
         const TRANSACTIONS_CACHE_TTL: Duration = Duration::from_secs(75);
         let block = ledger.latest_block().load();
@@ -83,6 +87,7 @@ impl SharedState {
             ledger,
             chainlink,
             subscriptions: Default::default(),
+            receipts,
         }
     }
 }

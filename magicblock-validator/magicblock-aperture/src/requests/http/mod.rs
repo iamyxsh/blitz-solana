@@ -424,6 +424,7 @@ pub(crate) mod get_transaction;
 pub(crate) mod get_version;
 pub(crate) mod is_blockhash_valid;
 pub(crate) mod mocked;
+pub(crate) mod receipted_signature;
 pub(crate) mod request_airdrop;
 pub(crate) mod send_transaction;
 pub(crate) mod simulate_transaction;

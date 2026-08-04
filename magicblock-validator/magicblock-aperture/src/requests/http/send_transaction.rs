@@ -8,14 +8,18 @@ use solana_transaction_error::TransactionError;
 use solana_transaction_status::UiTransactionEncoding;
 use tracing::*;
 
-use super::prelude::*;
+use super::{prelude::*, receipted_signature::ReceiptedSignature};
 
 impl HttpDispatcher {
     /// Handles the `sendTransaction` RPC request.
     ///
     /// Submits a new transaction to the validator's processing pipeline.
     /// The handler decodes and sanitizes the transaction, performs a robust
-    /// replay-protection check, and then forwards it directly to the execution queue.
+    /// replay-protection check, stamps an ingress-order receipt, and then
+    /// forwards it directly to the execution queue.
+    ///
+    /// The response carries the receipt alongside the signature, so this
+    /// method is deliberately not wire-compatible with stock Solana.
     #[instrument(skip_all)]
     pub(crate) async fn send_transaction(
         &self,
@@ -45,6 +49,20 @@ impl HttpDispatcher {
             return Err(TransactionError::AlreadyProcessed.into());
         }
 
+        // Stamped here, before account resolution: everything past this point
+        // is latency the operator controls, and an ordering claim made after
+        // an operator-controlled delay proves nothing about arrival order.
+        let receipt = self
+            .receipts
+            .stamp(
+                signature.into(),
+                transaction.encoded.clone(),
+                transaction.txn.message().recent_blockhash().to_bytes(),
+            )
+            .await
+            .inspect_err(|err| error!(error = ?err, "Failed to stamp receipt"))
+            .map_err(RpcError::internal)?;
+
         let fetch_context =
             Self::send_transaction_context(signature, remote_account_claims);
         self.ensure_transaction_accounts(&transaction.txn, fetch_context)
@@ -59,7 +77,7 @@ impl HttpDispatcher {
             self.transactions_scheduler.execute(transaction).await?;
         }
 
-        let signature = SerdeSignature(signature);
-        Ok(ResponsePayload::encode_no_context(&request.id, signature))
+        let result = ReceiptedSignature::new(signature, &receipt);
+        Ok(ResponsePayload::encode_no_context(&request.id, result))
     }
 }

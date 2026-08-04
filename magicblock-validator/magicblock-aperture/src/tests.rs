@@ -8,6 +8,7 @@ use std::{
 
 use hyper::body::Bytes;
 use magicblock_accounts_db::AccountsDb;
+use magicblock_receipts::ReceiptStamper;
 use solana_account_decoder::UiAccountEncoding;
 use solana_pubkey::Pubkey;
 use test_kit::{
@@ -37,6 +38,16 @@ fn ws_channel() -> (WsConnectionChannel, Receiver<Bytes>) {
     let (tx, rx) = channel(64);
     let tx = WsConnectionChannel { id, tx };
     (tx, rx)
+}
+
+/// A stamper wired to the test ledger's slot, keyed off a fixed operator key
+/// so assertions can verify signatures without plumbing the key through.
+fn receipts(ledger: &Arc<magicblock_ledger::Ledger>) -> ReceiptStamper {
+    let block = ledger.latest_block().clone();
+    ReceiptStamper::spawn(
+        ed25519_dalek::SigningKey::from_bytes(&[0x07; 32]),
+        Box::new(move || block.load().slot),
+    )
 }
 
 fn chainlink(accounts_db: &Arc<AccountsDb>) -> ChainlinkImpl {
@@ -70,6 +81,7 @@ mod event_processor {
             env.accountsdb.clone(),
             env.ledger.clone(),
             Arc::new(chainlink(&env.accountsdb)),
+            receipts(&env.ledger),
         );
         let cancel = CancellationToken::new();
         let config = ApertureConfig::default();
@@ -102,6 +114,7 @@ mod event_processor {
             env.accountsdb.clone(),
             env.ledger.clone(),
             Arc::new(chainlink(&env.accountsdb)),
+            receipts(&env.ledger),
         );
         let recovered = LatestBlockInner::new(2, BlockHash::new_unique(), 1);
         env.ledger.latest_block().store(recovered.clone());

@@ -26,6 +26,7 @@ use magicblock_ledger::Ledger;
 use magicblock_metrics::metrics::{
     RPC_REQUESTS_COUNT, RPC_REQUEST_HANDLING_TIME,
 };
+use magicblock_receipts::ReceiptStamper;
 use tokio::sync::Semaphore;
 
 use crate::{
@@ -66,6 +67,8 @@ pub(crate) struct HttpDispatcher {
     /// A handle to the transaction scheduler for processing
     /// `sendTransaction` and `simulateTransaction`.
     pub(crate) transactions_scheduler: TransactionSchedulerHandle,
+    /// Assigns and signs the ingress-order receipt for every transaction.
+    pub(crate) receipts: ReceiptStamper,
     /// Bounds concurrent iterator-based ledger scans so a burst of degraded
     /// (e.g. tombstone-scanning) queries cannot exhaust threads or the DB.
     blocking_reads: Semaphore,
@@ -94,6 +97,7 @@ impl HttpDispatcher {
             transactions: state.transactions.clone(),
             blocks: state.blocks.clone(),
             transactions_scheduler: channels.transaction_scheduler.clone(),
+            receipts: state.receipts.clone(),
             blocking_reads: Semaphore::new(permits),
         })
     }

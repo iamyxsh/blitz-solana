@@ -35,6 +35,8 @@ magicblock-config = { workspace = true }
 magicblock-core = { workspace = true }
 magicblock-ledger = { workspace = true }
 magicblock-metrics = { workspace = true }
+magicblock-receipts = { workspace = true }
+mb-receipt = { workspace = true }
 magicblock-version = { workspace = true }
 
 # solana
@@ -64,6 +66,9 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+ed25519-dalek = "2"
+serde_json = "1"
+solana-rpc-client-api = { workspace = true }
 rand = { workspace = true }
 test-kit = { workspace = true }
 reqwest = { workspace = true }

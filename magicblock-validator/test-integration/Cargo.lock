@@ -3027,13 +3027,16 @@ name = "integration-test-tools"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "borsh 1.7.0",
+ "bs58",
  "color-backtrace",
  "magicblock-config",
  "magicblock-delegation-program-api 3.1.0",
  "rand 0.8.6",
  "rayon",
  "serde",
+ "serde_json",
  "solana-commitment-config",
  "solana-pubkey 4.1.0",
  "solana-rpc-client",
@@ -3555,7 +3558,9 @@ dependencies = [
  "magicblock-core",
  "magicblock-ledger",
  "magicblock-metrics",
+ "magicblock-receipts",
  "magicblock-version",
+ "mb-receipt",
  "parking_lot",
  "scc",
  "serde",
@@ -3600,6 +3605,7 @@ dependencies = [
  "magicblock-metrics",
  "magicblock-processor",
  "magicblock-program",
+ "magicblock-receipts",
  "magicblock-replicator",
  "magicblock-rpc-client",
  "magicblock-services",
@@ -4028,6 +4034,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "magicblock-receipts"
+version = "0.13.19"
+dependencies = [
+ "bytes",
+ "ed25519-dalek 2.2.0",
+ "magicblock-core",
+ "mb-receipt",
+ "solana-keypair",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "magicblock-replicator"
 version = "0.13.19"
 dependencies = [
@@ -4206,6 +4225,20 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "mb-constants"
+version = "0.1.0"
+
+[[package]]
+name = "mb-receipt"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "mb-constants",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "memchr"
