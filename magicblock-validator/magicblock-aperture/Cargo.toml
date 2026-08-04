@@ -67,6 +67,9 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 ed25519-dalek = "2"
+tokio-tungstenite = "0.28"
+solana-signature = { workspace = true }
+futures-util = { workspace = true }
 serde_json = "1"
 solana-rpc-client-api = { workspace = true }
 rand = { workspace = true }

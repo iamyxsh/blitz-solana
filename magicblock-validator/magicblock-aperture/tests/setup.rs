@@ -85,6 +85,113 @@ pub struct RpcTestEnv {
     pub block: LatestBlock,
     /// The key every receipt this node issues must verify against.
     pub operator: ed25519_dalek::VerifyingKey,
+    /// The websocket endpoint, for subscriptions the typed client lacks.
+    pub ws_url: String,
+    request_ids: AtomicU16,
+}
+
+/// A raw `receiptSubscribe` stream.
+pub struct ReceiptStream {
+    socket: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    sub_id: u64,
+}
+
+impl ReceiptStream {
+    async fn open(ws_url: &str, request_id: u16) -> Self {
+        use futures_util::SinkExt;
+
+        let (mut socket, _) = tokio_tungstenite::connect_async(ws_url)
+            .await
+            .expect("websocket should connect");
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "receiptSubscribe",
+            "params": [],
+        });
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                request.to_string().into(),
+            ))
+            .await
+            .expect("subscribe request should send");
+
+        let mut stream = Self { socket, sub_id: 0 };
+        let ack = stream.next_json().await;
+        stream.sub_id = ack["result"].as_u64().unwrap_or_else(|| {
+            panic!("receiptSubscribe should return a subscription id: {ack}")
+        });
+        stream
+    }
+
+    /// Cancels the subscription and waits for the acknowledgement.
+    pub async fn unsubscribe(&mut self) {
+        use futures_util::SinkExt;
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9_999,
+            "method": "receiptUnsubscribe",
+            "params": [self.sub_id],
+        });
+        self.socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                request.to_string().into(),
+            ))
+            .await
+            .expect("unsubscribe request should send");
+
+        let ack = self.next_json().await;
+        assert_eq!(ack["result"], true, "unsubscribe should succeed: {ack}");
+    }
+
+    async fn next_json(&mut self) -> serde_json::Value {
+        use futures_util::StreamExt;
+
+        loop {
+            let message = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.socket.next(),
+            )
+            .await
+            .expect("timed out waiting on the websocket")
+            .expect("websocket should stay open")
+            .expect("websocket frame should decode");
+
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = message
+            {
+                return serde_json::from_str(&text)
+                    .expect("notification should be valid JSON");
+            }
+        }
+    }
+
+    /// Waits for the next receipt notification and decodes it.
+    pub async fn next_receipt(&mut self) -> SignedReceipt {
+        let notification = self.next_json().await;
+        assert_eq!(notification["method"], "receiptNotification");
+        let encoded = notification["params"]["result"]
+            .as_str()
+            .expect("result should be a base64 string");
+        let bytes = BASE64_STANDARD
+            .decode(encoded)
+            .expect("result should be base64");
+        SignedReceipt::from_bytes(&bytes).expect("receipt should decode")
+    }
+
+    /// Whether anything arrives within a short grace period.
+    pub async fn is_idle(&mut self) -> bool {
+        use futures_util::StreamExt;
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            self.socket.next(),
+        )
+        .await
+        .is_err()
+    }
 }
 
 /// The operator identity used by the test node. Fixed so assertions can
@@ -197,6 +304,8 @@ impl RpcTestEnv {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         Self {
+            ws_url: pubsub_url.clone(),
+            request_ids: AtomicU16::new(1),
             block: execution.ledger.latest_block().clone(),
             operator: ed25519_dalek::SigningKey::from_bytes(&OPERATOR_SECRET)
                 .verifying_key(),
@@ -204,6 +313,10 @@ impl RpcTestEnv {
             rpc,
             pubsub,
         }
+    }
+
+    fn next_request_id(&self) -> u16 {
+        self.request_ids.fetch_add(1, Ordering::Relaxed)
     }
 
     // --- Account Creation Helpers ---
@@ -364,6 +477,40 @@ impl RpcTestEnv {
         let from = Pubkey::new_unique();
         let to = Pubkey::new_unique();
         self.build_transfer_txn_with_params(from, to, true)
+    }
+
+    /// Calls a JSON-RPC method that the typed client does not know about and
+    /// returns the raw `result` value.
+    pub async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": self.next_request_id(),
+            "method": method,
+            "params": params,
+        });
+        let body: serde_json::Value = reqwest::Client::new()
+            .post(self.rpc.url())
+            .json(&request)
+            .send()
+            .await
+            .expect("rpc request should succeed")
+            .json()
+            .await
+            .expect("rpc response should be JSON");
+        assert!(body.get("error").is_none(), "{method} failed: {body}");
+        body["result"].clone()
+    }
+
+    /// Opens a raw websocket and subscribes to the ingress receipt stream.
+    ///
+    /// `receiptSubscribe` is not part of the Solana RPC surface, so the typed
+    /// `PubsubClient` cannot reach it.
+    pub async fn receipt_stream(&self) -> ReceiptStream {
+        ReceiptStream::open(&self.ws_url, self.next_request_id()).await
     }
 
     /// Sends a transaction and returns its signature together with the

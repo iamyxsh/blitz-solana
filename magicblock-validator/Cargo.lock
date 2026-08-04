@@ -3540,6 +3540,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "fastwebsockets",
  "futures",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -3578,6 +3579,7 @@ dependencies = [
  "test-kit",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
 ]

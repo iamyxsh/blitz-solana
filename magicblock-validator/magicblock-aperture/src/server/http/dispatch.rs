@@ -252,6 +252,12 @@ impl HttpDispatcher {
                 .await
             }
             GetProgramAccounts => self.get_program_accounts(request),
+            GetReceipt => self.get_receipt(request),
+            // An iterator-based ledger scan: kept off the RPC runtime workers
+            // for the same reason getBlock is.
+            GetReceipts => {
+                self.run_blocking(|| self.get_receipts(request)).await
+            }
             GetRecentPerformanceSamples => {
                 self.get_recent_performance_samples(request)
             }

@@ -121,6 +121,7 @@ mod encoder;
 pub mod error;
 mod geyser;
 mod processor;
+mod receipt_fanout;
 mod requests;
 pub mod server;
 pub mod state;

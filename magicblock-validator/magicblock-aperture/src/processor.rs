@@ -12,6 +12,7 @@ use tracing::{info, instrument, warn};
 
 use crate::{
     geyser::GeyserPluginManager,
+    receipt_fanout::ReceiptFanout,
     state::{
         blocks::BlocksCache,
         subscriptions::SubscriptionsDb,
@@ -116,17 +117,18 @@ impl EventProcessors {
             cancel,
             geyser,
         } = self;
-        (0..config.event_processors)
-            .map(|id| {
-                let processor = EventProcessor::new(
-                    &state,
-                    account_update_rx.clone(),
-                    transaction_status_rx.clone(),
-                    geyser.clone(),
-                );
-                tokio::spawn(processor.run(id, cancel.clone()))
-            })
-            .collect()
+        let mut tasks =
+            vec![tokio::spawn(ReceiptFanout::new(&state).run(cancel.clone()))];
+        tasks.extend((0..config.event_processors).map(|id| {
+            let processor = EventProcessor::new(
+                &state,
+                account_update_rx.clone(),
+                transaction_status_rx.clone(),
+                geyser.clone(),
+            );
+            tokio::spawn(processor.run(id, cancel.clone()))
+        }));
+        tasks
     }
 }
 

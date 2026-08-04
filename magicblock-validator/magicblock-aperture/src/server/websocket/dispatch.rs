@@ -81,9 +81,10 @@ impl WsDispatcher {
             ProgramSubscribe => self.program_subscribe(request).await,
             SignatureSubscribe => self.signature_subscribe(request).await,
             SlotSubscribe => self.slot_subscribe(),
+            ReceiptSubscribe => self.receipt_subscribe(),
             LogsSubscribe => self.logs_subscribe(request),
             AccountUnsubscribe | ProgramUnsubscribe | LogsUnsubscribe
-            | SlotUnsubscribe | SignatureUnsubscribe => {
+            | SlotUnsubscribe | SignatureUnsubscribe | ReceiptUnsubscribe => {
                 self.unsubscribe(request)
             }
             Ping => Ok(SubResult::Pong("pong")),

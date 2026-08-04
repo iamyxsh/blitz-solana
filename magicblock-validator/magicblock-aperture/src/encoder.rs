@@ -1,11 +1,13 @@
 use std::fmt::Debug;
 
+use base64::{prelude::BASE64_STANDARD, Engine};
 use hyper::body::Bytes;
 use json::Serialize;
 use magicblock_core::{
     link::{accounts::LockedAccount, transactions::TransactionStatus},
     Slot,
 };
+use mb_receipt::SignedReceipt;
 use solana_account::ReadableAccount;
 use solana_account_decoder::{
     encode_ui_account, UiAccountEncoding, UiDataSliceConfig,
@@ -194,5 +196,27 @@ impl Encoder for SlotEncoder {
             root: slot,
         };
         NotificationPayload::encode_no_context(update, method, id)
+    }
+}
+
+/// A `receiptSubscribe` payload encoder.
+///
+/// Emits the same base64 of the 293 transport bytes that `sendTransaction`
+/// returns, so a client needs exactly one receipt decoder.
+#[derive(PartialEq, PartialOrd, Ord, Eq, Clone, Debug)]
+pub(crate) struct ReceiptEncoder;
+
+impl Encoder for ReceiptEncoder {
+    type Data = SignedReceipt;
+
+    fn encode(
+        &self,
+        _slot: Slot,
+        data: &Self::Data,
+        id: SubscriptionID,
+    ) -> Option<Bytes> {
+        let method = "receiptNotification";
+        let encoded = BASE64_STANDARD.encode(data.to_bytes());
+        NotificationPayload::encode_no_context(encoded, method, id)
     }
 }

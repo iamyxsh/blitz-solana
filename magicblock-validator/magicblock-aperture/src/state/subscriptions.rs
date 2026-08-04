@@ -18,10 +18,12 @@ use solana_account::ReadableAccount;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 
+use mb_receipt::SignedReceipt;
+
 use crate::{
     encoder::{
-        AccountEncoder, Encoder, ProgramAccountEncoder, SlotEncoder,
-        TransactionLogsEncoder, TransactionResultEncoder,
+        AccountEncoder, Encoder, ProgramAccountEncoder, ReceiptEncoder,
+        SlotEncoder, TransactionLogsEncoder, TransactionResultEncoder,
     },
     server::websocket::{
         connection::ConnectionID,
@@ -42,6 +44,9 @@ pub(crate) type SignatureSubscriptionsDb =
 pub(crate) type LogsSubscriptionsDb =
     Arc<RwLock<UpdateSubscribers<TransactionLogsEncoder>>>;
 /// Manages subscriptions to slot updates.
+pub(crate) type ReceiptSubscriptionsDb =
+    Arc<RwLock<UpdateSubscriber<ReceiptEncoder>>>;
+
 pub(crate) type SlotSubscriptionsDb =
     Arc<RwLock<UpdateSubscriber<SlotEncoder>>>;
 
@@ -67,6 +72,8 @@ pub(crate) struct SubscriptionsDb {
     pub(crate) logs: LogsSubscriptionsDb,
     /// Subscriptions for slot updates.
     pub(crate) slot: SlotSubscriptionsDb,
+    /// Subscriptions for the ingress receipt stream.
+    pub(crate) receipts: ReceiptSubscriptionsDb,
 }
 
 impl Default for SubscriptionsDb {
@@ -74,12 +81,14 @@ impl Default for SubscriptionsDb {
     /// subscriptions like `logs` and `slot`.
     fn default() -> Self {
         let slot = UpdateSubscriber::new(None, SlotEncoder);
+        let receipts = UpdateSubscriber::new(None, ReceiptEncoder);
         Self {
             accounts: Default::default(),
             programs: Default::default(),
             signatures: Default::default(),
             logs: Arc::new(RwLock::new(UpdateSubscribers(Vec::new()))),
             slot: Arc::new(RwLock::new(slot)),
+            receipts: Arc::new(RwLock::new(receipts)),
         }
     }
 }
@@ -271,6 +280,37 @@ impl SubscriptionsDb {
     /// Sends a slot update to all slot subscribers.
     pub(crate) fn send_slot(&self, slot: Slot) {
         self.slot.read().send(&(), slot);
+    }
+
+    /// Subscribes a connection to the ingress receipt stream.
+    pub(crate) fn subscribe_to_receipts(
+        &self,
+        chan: WsConnectionChannel,
+    ) -> SubscriptionHandle {
+        let conid = chan.id;
+        let mut subscriber = self.receipts.write();
+        subscriber.txs.insert(chan.id, chan.tx);
+        let id = subscriber.id;
+
+        let receipts = self.receipts.clone();
+        let metric = SubMetricGuard::new("receipt-subscribe");
+        let callback = async move {
+            receipts.write().txs.remove(&conid);
+            drop(metric)
+        };
+        let cleanup = CleanUp(Some(Box::pin(callback)));
+        SubscriptionHandle { id, cleanup }
+    }
+
+    /// Fans a freshly sequenced receipt out to every subscriber.
+    ///
+    /// Delivery is best-effort: a connection whose channel is full silently
+    /// misses the receipt. The stream is a latency optimization, never the
+    /// source of truth — that is the persisted log.
+    pub(crate) fn send_receipt(&self, receipt: &SignedReceipt) {
+        self.receipts
+            .read()
+            .send(receipt, receipt.receipt.ingress_slot);
     }
 
     /// Generates the next unique subscription ID.

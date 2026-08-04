@@ -205,3 +205,218 @@ async fn the_persisted_log_replays_a_verifiable_chain() {
         assert_eq!(pair[1].receipt.prev_receipt_hash, pair[0].receipt_hash());
     }
 }
+
+#[tokio::test]
+async fn subscribers_receive_receipts_in_sequence_order() {
+    let env = RpcTestEnv::new().await;
+    let mut stream = env.receipt_stream().await;
+
+    let mut sent = Vec::new();
+    for _ in 0..3 {
+        let (_, signed) =
+            env.send_transaction_ok(&env.build_transfer_txn()).await;
+        sent.push(signed);
+    }
+
+    for expected in sent {
+        let observed = stream.next_receipt().await;
+        assert_eq!(observed, expected);
+        assert!(observed.verify(&env.operator).is_ok());
+    }
+}
+
+/// The stream is live-only, and that is the whole reason a watchtower needs a
+/// backfill path. A subscriber that joins late sees nothing before it arrived,
+/// and the gap is indistinguishable from censorship unless it reads the log.
+#[tokio::test]
+async fn a_late_subscriber_sees_only_receipts_issued_after_it_joined() {
+    let env = RpcTestEnv::new().await;
+
+    let (_, missed) = env.send_transaction_ok(&env.build_transfer_txn()).await;
+    assert_eq!(missed.receipt.seq, 0);
+
+    let mut stream = env.receipt_stream().await;
+    let (_, observed) =
+        env.send_transaction_ok(&env.build_transfer_txn()).await;
+    assert_eq!(observed.receipt.seq, 1);
+
+    assert_eq!(stream.next_receipt().await, observed);
+
+    // The missed receipt is only reachable from the persisted log.
+    let (_, replayed) = env
+        .execution
+        .ledger
+        .read_receipt(0)
+        .unwrap()
+        .expect("seq 0 must still be on disk");
+    assert_eq!(
+        mb_receipt::SignedReceipt::from_bytes(&replayed).unwrap(),
+        missed
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_subscriber_stops_receiving() {
+    let env = RpcTestEnv::new().await;
+    let mut stream = env.receipt_stream().await;
+
+    env.send_transaction_ok(&env.build_transfer_txn()).await;
+    stream.next_receipt().await;
+
+    drop(stream);
+
+    // A second subscriber proves the stream still works for everyone else.
+    let mut survivor = env.receipt_stream().await;
+    let (_, signed) = env.send_transaction_ok(&env.build_transfer_txn()).await;
+    assert_eq!(survivor.next_receipt().await, signed);
+}
+
+#[tokio::test]
+async fn the_stream_stays_quiet_when_nothing_is_sent() {
+    let env = RpcTestEnv::new().await;
+    let mut stream = env.receipt_stream().await;
+
+    assert!(
+        stream.is_idle().await,
+        "an idle node must not emit receipt notifications"
+    );
+}
+
+#[tokio::test]
+async fn unsubscribing_stops_delivery() {
+    let env = RpcTestEnv::new().await;
+    let mut stream = env.receipt_stream().await;
+
+    env.send_transaction_ok(&env.build_transfer_txn()).await;
+    stream.next_receipt().await;
+
+    stream.unsubscribe().await;
+
+    env.send_transaction_ok(&env.build_transfer_txn()).await;
+    assert!(
+        stream.is_idle().await,
+        "no receipts should arrive after unsubscribing"
+    );
+}
+
+/// Decodes a `getReceipts` entry into the receipt it carries.
+fn decode_entry(entry: &serde_json::Value) -> mb_receipt::SignedReceipt {
+    use base64::{prelude::BASE64_STANDARD, Engine};
+
+    let bytes = BASE64_STANDARD
+        .decode(
+            entry["receipt"]
+                .as_str()
+                .expect("receipt should be a string"),
+        )
+        .expect("receipt should be base64");
+    mb_receipt::SignedReceipt::from_bytes(&bytes).expect("receipt decodes")
+}
+
+/// The reason this method exists: a watchtower that was not connected when a
+/// receipt was issued must still be able to obtain it, or the gap in its view
+/// is indistinguishable from a withheld transaction.
+#[tokio::test]
+async fn get_receipts_backfills_what_the_stream_missed() {
+    let env = RpcTestEnv::new().await;
+
+    let mut issued = Vec::new();
+    for _ in 0..3 {
+        let (_, signed) =
+            env.send_transaction_ok(&env.build_transfer_txn()).await;
+        issued.push(signed);
+    }
+
+    // Subscribing only now would miss all three.
+    let result = env.call("getReceipts", serde_json::json!([0])).await;
+    let entries = result.as_array().expect("result should be an array");
+
+    assert_eq!(entries.len(), 3);
+    for (position, entry) in entries.iter().enumerate() {
+        assert_eq!(entry["seq"], position as u64);
+        assert_eq!(decode_entry(entry), issued[position]);
+        assert!(decode_entry(entry).verify(&env.operator).is_ok());
+    }
+}
+
+#[tokio::test]
+async fn get_receipts_pages_from_a_sequence_number() {
+    let env = RpcTestEnv::new().await;
+    for _ in 0..5 {
+        env.send_transaction_ok(&env.build_transfer_txn()).await;
+    }
+
+    let page = env.call("getReceipts", serde_json::json!([2, 2])).await;
+    let entries = page.as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["seq"], 2);
+    assert_eq!(entries[1]["seq"], 3);
+
+    let tail = env.call("getReceipts", serde_json::json!([4])).await;
+    assert_eq!(tail.as_array().unwrap().len(), 1);
+
+    let past_the_end = env.call("getReceipts", serde_json::json!([99])).await;
+    assert!(
+        past_the_end.as_array().unwrap().is_empty(),
+        "a sequence number beyond the log is empty, not an error"
+    );
+}
+
+/// The chain must survive the round trip through JSON, or the backfill path
+/// hands a watchtower something it cannot verify.
+#[tokio::test]
+async fn a_backfilled_page_replays_the_same_chain() {
+    let env = RpcTestEnv::new().await;
+    for _ in 0..4 {
+        env.send_transaction_ok(&env.build_transfer_txn()).await;
+    }
+
+    let result = env.call("getReceipts", serde_json::json!([0])).await;
+    let replayed: Vec<mb_receipt::SignedReceipt> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(decode_entry)
+        .collect();
+
+    assert_eq!(replayed[0].receipt.prev_receipt_hash, GENESIS_PREV_HASH);
+    for pair in replayed.windows(2) {
+        assert_eq!(pair[1].receipt.prev_receipt_hash, pair[0].receipt_hash());
+    }
+}
+
+#[tokio::test]
+async fn get_receipts_reports_the_outcome_alongside_each_receipt() {
+    let env = RpcTestEnv::new().await;
+    let (_, signed) = env.send_transaction_ok(&env.build_transfer_txn()).await;
+    await_outcome(&env, signed.receipt.seq).await;
+
+    let result = env.call("getReceipts", serde_json::json!([0])).await;
+    assert_eq!(result[0]["outcome"], "accepted");
+}
+
+#[tokio::test]
+async fn get_receipt_finds_a_receipt_by_transaction_signature() {
+    let env = RpcTestEnv::new().await;
+    let txn = env.build_transfer_txn();
+    let (signature, signed) = env.send_transaction_ok(&txn).await;
+
+    let found = env
+        .call("getReceipt", serde_json::json!([signature.to_string()]))
+        .await;
+    assert_eq!(found["seq"], 0);
+    assert_eq!(decode_entry(&found), signed);
+
+    let missing = env
+        .call(
+            "getReceipt",
+            serde_json::json!([
+                solana_signature::Signature::default().to_string()
+            ]),
+        )
+        .await;
+    assert!(
+        missing.is_null(),
+        "an unknown signature is null, not an error"
+    );
+}
