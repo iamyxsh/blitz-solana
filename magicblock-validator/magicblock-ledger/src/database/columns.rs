@@ -23,6 +23,10 @@ const CONFIRMED_TRANSACTION_CF: &str = "confirmed_transaction";
 const TRANSACTION_MEMOS_CF: &str = "transaction_memos";
 /// Column family for Performance Samples
 const PERF_SAMPLES_CF: &str = "perf_samples";
+/// Column family for the ingress receipt log, keyed by sequence number
+const RECEIPT_BY_SEQ_CF: &str = "receipt_by_seq";
+/// Column family mapping a transaction signature to its receipt sequence
+const RECEIPT_BY_SIG_CF: &str = "receipt_by_sig";
 
 #[derive(Debug)]
 /// The transaction status column
@@ -89,6 +93,23 @@ pub struct TransactionMemos;
 /// * value type: [`crate::database::meta::PerfSample`]
 pub struct PerfSamples;
 
+#[derive(Debug)]
+/// The ingress receipt log, in sequence order.
+///
+/// Keys are big-endian so RocksDB's lexicographic ordering is numeric
+/// ordering, which is what makes walking the chain a range scan.
+///
+/// * index type: `u64` (receipt sequence number)
+/// * value type: `[outcome: u8][signed receipt: 293 bytes]`
+pub struct ReceiptBySeq;
+
+#[derive(Debug)]
+/// Maps a transaction signature to the sequence number of its receipt.
+///
+/// * index type: [`Signature`]
+/// * value type: `u64` (big-endian)
+pub struct ReceiptBySig;
+
 // When adding a new column ...
 // - Add struct below and implement `Column` and `ColumnName` traits
 // - Add descriptor in Rocks::cf_descriptors() and name in Rocks::columns()
@@ -106,6 +127,8 @@ pub fn columns() -> Vec<&'static str> {
         Transaction::NAME,
         TransactionMemos::NAME,
         PerfSamples::NAME,
+        ReceiptBySeq::NAME,
+        ReceiptBySig::NAME,
     ]
 }
 
@@ -625,3 +648,71 @@ impl ColumnName for PerfSamples {
 // Column Queries
 // -----------------
 pub(crate) const DIRTY_COUNT: i64 = -1;
+
+// -----------------
+// Receipts
+// -----------------
+//
+// Both receipt columns are keyed by something other than a slot, so the
+// slot-based compaction filter has no valid slot to compare and would treat
+// every key as older than `oldest_slot`. They opt out of it entirely.
+
+impl Column for ReceiptBySeq {
+    type Index = u64;
+
+    fn key(seq: u64) -> Vec<u8> {
+        let mut key = vec![0; 8];
+        BigEndian::write_u64(&mut key[..], seq);
+        key
+    }
+
+    fn index(key: &[u8]) -> u64 {
+        BigEndian::read_u64(&key[..8])
+    }
+
+    // Receipts are not slot-addressed; see the note above.
+    fn slot(_index: Self::Index) -> Slot {
+        0
+    }
+
+    fn as_index(_slot: u64) -> Self::Index {
+        0
+    }
+
+    fn keep_all_on_compaction() -> bool {
+        true
+    }
+}
+
+impl ColumnName for ReceiptBySeq {
+    const NAME: &'static str = RECEIPT_BY_SEQ_CF;
+}
+
+impl Column for ReceiptBySig {
+    type Index = Signature;
+
+    fn key(signature: Signature) -> Vec<u8> {
+        signature.as_ref().to_vec()
+    }
+
+    fn index(key: &[u8]) -> Signature {
+        Signature::try_from(&key[..64]).unwrap_or_default()
+    }
+
+    // Receipts are not slot-addressed; see the note above.
+    fn slot(_index: Self::Index) -> Slot {
+        0
+    }
+
+    fn as_index(_slot: u64) -> Self::Index {
+        Signature::default()
+    }
+
+    fn keep_all_on_compaction() -> bool {
+        true
+    }
+}
+
+impl ColumnName for ReceiptBySig {
+    const NAME: &'static str = RECEIPT_BY_SIG_CF;
+}

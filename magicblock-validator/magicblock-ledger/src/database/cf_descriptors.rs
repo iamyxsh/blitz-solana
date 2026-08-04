@@ -58,6 +58,8 @@ pub fn cf_descriptors(
             &block_cache,
         ),
         new_cf_descriptor::<PerfSamples>(options, oldest_slot, &block_cache),
+        new_cf_descriptor::<ReceiptBySeq>(options, oldest_slot, &block_cache),
+        new_cf_descriptor::<ReceiptBySig>(options, oldest_slot, &block_cache),
     ];
 
     // If the access type is Secondary, we don't need to open all of the

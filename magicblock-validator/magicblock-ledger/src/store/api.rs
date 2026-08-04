@@ -65,6 +65,8 @@ pub struct Ledger {
     transaction_cf: LedgerColumn<cf::Transaction>,
     transaction_memos_cf: LedgerColumn<cf::TransactionMemos>,
     perf_samples_cf: LedgerColumn<cf::PerfSamples>,
+    receipt_by_seq_cf: LedgerColumn<cf::ReceiptBySeq>,
+    receipt_by_sig_cf: LedgerColumn<cf::ReceiptBySig>,
 
     transaction_successful_status_count: AtomicI64,
     transaction_failed_status_count: AtomicI64,
@@ -138,6 +140,8 @@ impl Ledger {
         let transaction_cf = db.column();
         let transaction_memos_cf = db.column();
         let perf_samples_cf = db.column();
+        let receipt_by_seq_cf = db.column();
+        let receipt_by_sig_cf = db.column();
 
         let db = Arc::new(db);
 
@@ -159,6 +163,8 @@ impl Ledger {
             transaction_cf,
             transaction_memos_cf,
             perf_samples_cf,
+            receipt_by_seq_cf,
+            receipt_by_sig_cf,
 
             transaction_successful_status_count: AtomicI64::new(DIRTY_COUNT),
             transaction_failed_status_count: AtomicI64::new(DIRTY_COUNT),
@@ -1291,6 +1297,115 @@ impl Ledger {
     // -----------------
     // Perf
     // -----------------
+    // -----------------
+    // Receipts
+    // -----------------
+
+    /// Stored value layout: one outcome byte, then the signed receipt exactly
+    /// as it went out to the client.
+    const RECEIPT_OUTCOME_LEN: usize = 1;
+
+    /// Records a receipt under both indexes.
+    ///
+    /// The two puts are not batched, matching `write_transaction`. A crash
+    /// between them leaves a `by_seq` row with no signature index, which a
+    /// scan can rebuild; it never loses the receipt itself.
+    pub fn write_receipt(
+        &self,
+        seq: u64,
+        signature: Signature,
+        outcome: u8,
+        receipt: &[u8],
+    ) -> LedgerResult<()> {
+        let mut value =
+            Vec::with_capacity(Self::RECEIPT_OUTCOME_LEN + receipt.len());
+        value.push(outcome);
+        value.extend_from_slice(receipt);
+
+        self.receipt_by_seq_cf.put_bytes(seq, &value)?;
+        self.receipt_by_sig_cf
+            .put_bytes(signature, &seq.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Replaces the outcome byte, leaving the signed receipt untouched.
+    /// Returns `false` if no receipt is stored at that sequence number.
+    pub fn set_receipt_outcome(
+        &self,
+        seq: u64,
+        outcome: u8,
+    ) -> LedgerResult<bool> {
+        let Some(mut value) = self.receipt_by_seq_cf.get_bytes(seq)? else {
+            return Ok(false);
+        };
+        if value.is_empty() {
+            return Err(LedgerError::ReceiptCorrupted(seq));
+        }
+        value[0] = outcome;
+        self.receipt_by_seq_cf.put_bytes(seq, &value)?;
+        Ok(true)
+    }
+
+    /// Reads one receipt. A sequence number that was never written reads as
+    /// `None` rather than an error, so a gap stays distinguishable from a
+    /// storage failure.
+    pub fn read_receipt(
+        &self,
+        seq: u64,
+    ) -> LedgerResult<Option<(u8, Vec<u8>)>> {
+        let Some(value) = self.receipt_by_seq_cf.get_bytes(seq)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self::split_receipt(seq, value)?))
+    }
+
+    pub fn read_receipt_by_signature(
+        &self,
+        signature: Signature,
+    ) -> LedgerResult<Option<(u64, u8, Vec<u8>)>> {
+        let Some(bytes) = self.receipt_by_sig_cf.get_bytes(signature)? else {
+            return Ok(None);
+        };
+        let seq = u64::from_be_bytes(bytes.as_slice().try_into()?);
+        Ok(self
+            .read_receipt(seq)?
+            .map(|(outcome, receipt)| (seq, outcome, receipt)))
+    }
+
+    /// Walks receipts in ascending sequence order from `from_seq`.
+    ///
+    /// Ascending order is a property of the big-endian key encoding, not of
+    /// this method.
+    pub fn iter_receipts(
+        &self,
+        from_seq: u64,
+    ) -> LedgerResult<impl Iterator<Item = (u64, u8, Vec<u8>)> + '_> {
+        let iter = self
+            .receipt_by_seq_cf
+            .iter(IteratorMode::From(from_seq, IteratorDirection::Forward))?;
+        Ok(iter.filter_map(|(seq, value)| {
+            Self::split_receipt(seq, value.into_vec())
+                .inspect_err(|error| error!(%error, "skipping receipt"))
+                .ok()
+                .map(|(outcome, receipt)| (seq, outcome, receipt))
+        }))
+    }
+
+    pub fn count_receipts(&self) -> LedgerResult<i64> {
+        Ok(self.receipt_by_seq_cf.iter(IteratorMode::Start)?.count() as i64)
+    }
+
+    fn split_receipt(
+        seq: u64,
+        mut value: Vec<u8>,
+    ) -> LedgerResult<(u8, Vec<u8>)> {
+        if value.is_empty() {
+            return Err(LedgerError::ReceiptCorrupted(seq));
+        }
+        let receipt = value.split_off(Self::RECEIPT_OUTCOME_LEN);
+        Ok((value[0], receipt))
+    }
+
     pub fn get_recent_perf_samples(
         &self,
         num: usize,
@@ -1561,6 +1676,45 @@ mod tests {
     use test_kit::init_logger;
 
     use super::*;
+
+    /// The slot-based compaction filter deletes any key whose `slot()` falls
+    /// below `oldest_slot`. Receipt columns are keyed by sequence number and
+    /// have no slot, so without `keep_all_on_compaction` every receipt would
+    /// be dropped the first time the truncator advanced and a compaction ran
+    /// — evidence disappearing exactly like a withheld transaction.
+    #[test]
+    fn receipts_survive_compaction_after_the_truncator_advances() {
+        let ledger_path = get_ledger_path_from_name_auto_delete(
+            "receipts_survive_compaction",
+        );
+        let ledger = Ledger::open(ledger_path.path()).unwrap();
+
+        for seq in 0..8u64 {
+            ledger
+                .write_receipt(
+                    seq,
+                    Signature::from([seq as u8 | 0x80; 64]),
+                    0x01,
+                    &vec![0xAB; 293],
+                )
+                .unwrap();
+        }
+        ledger.flush().unwrap();
+
+        // Pretend the truncator has purged everything up to slot 10_000.
+        ledger.set_lowest_cleanup_slot(10_000);
+        ledger.compact_slot_range_cf::<cf::ReceiptBySeq>(None, None);
+        ledger.compact_slot_range_cf::<cf::ReceiptBySig>(None, None);
+
+        assert_eq!(ledger.count_receipts().unwrap(), 8);
+        assert_eq!(
+            ledger
+                .read_receipt_by_signature(Signature::from([0x85; 64]))
+                .unwrap()
+                .map(|(seq, _, _)| seq),
+            Some(5)
+        );
+    }
 
     pub fn get_ledger_path_from_name_auto_delete(name: &str) -> TempDir {
         let mut path = get_ledger_path_from_name(name);

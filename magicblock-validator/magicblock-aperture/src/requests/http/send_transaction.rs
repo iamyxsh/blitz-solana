@@ -3,6 +3,7 @@ use std::sync::{atomic::AtomicU64, Arc};
 use magicblock_metrics::metrics::{
     TRANSACTION_PROCESSING_TIME, TRANSACTION_SKIP_PREFLIGHT,
 };
+use magicblock_receipts::Outcome;
 use solana_rpc_client_api::config::RpcSendTransactionConfig;
 use solana_transaction_error::TransactionError;
 use solana_transaction_status::UiTransactionEncoding;
@@ -63,19 +64,36 @@ impl HttpDispatcher {
             .inspect_err(|err| error!(error = ?err, "Failed to stamp receipt"))
             .map_err(RpcError::internal)?;
 
+        let seq = receipt.receipt.seq;
+
         let fetch_context =
             Self::send_transaction_context(signature, remote_account_claims);
-        self.ensure_transaction_accounts(&transaction.txn, fetch_context)
-            .await?;
+        if let Err(err) = self
+            .ensure_transaction_accounts(&transaction.txn, fetch_context)
+            .await
+        {
+            self.receipts.record_outcome(seq, Outcome::Rejected).await;
+            return Err(err);
+        }
 
         // Based on the preflight flag, either execute and await the result,
         // or schedule (fire-and-forget) for background processing.
-        if config.skip_preflight {
+        let scheduled = if config.skip_preflight {
             TRANSACTION_SKIP_PREFLIGHT.inc();
-            self.transactions_scheduler.schedule(transaction).await?;
+            self.transactions_scheduler.schedule(transaction).await
         } else {
-            self.transactions_scheduler.execute(transaction).await?;
-        }
+            self.transactions_scheduler.execute(transaction).await
+        };
+
+        // A transaction the scheduler took holds a position in a block even
+        // if execution then reverted. Only failing to reach the scheduler
+        // means no position was ever assigned, so only that is a rejection.
+        let outcome = match &scheduled {
+            Err(TransactionError::ClusterMaintenance) => Outcome::Rejected,
+            _ => Outcome::Accepted,
+        };
+        self.receipts.record_outcome(seq, outcome).await;
+        scheduled?;
 
         let result = ReceiptedSignature::new(signature, &receipt);
         Ok(ResponsePayload::encode_no_context(&request.id, result))

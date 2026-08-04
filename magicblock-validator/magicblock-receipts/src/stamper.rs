@@ -1,11 +1,15 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use mb_receipt::{SignedReceipt, LEN_HASH, LEN_TX_SIG};
+use magicblock_ledger::Ledger;
+use mb_receipt::{Outcome, SignedReceipt, LEN_HASH, LEN_TX_SIG};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::error;
 
 use crate::{
-    error::StampError, request::StampRequest, slot_source::SlotSource,
-    writer::ReceiptWriter,
+    command::WriterCommand, error::StampError, request::StampRequest,
+    slot_source::SlotSource, writer::ReceiptWriter,
 };
 
 /// Bounds how many callers may queue before `stamp` applies backpressure.
@@ -19,18 +23,22 @@ const EVENT_QUEUE_CAPACITY: usize = 4096;
 /// stream. It grants no access whatsoever to the sequence number or the chain.
 #[derive(Clone)]
 pub struct ReceiptStamper {
-    outbox: mpsc::Sender<StampRequest>,
+    outbox: mpsc::Sender<WriterCommand>,
     events: broadcast::Sender<SignedReceipt>,
     operator: VerifyingKey,
 }
 
 impl ReceiptStamper {
-    pub fn spawn(key: SigningKey, slots: SlotSource) -> Self {
+    pub fn spawn(
+        ledger: Arc<Ledger>,
+        key: SigningKey,
+        slots: SlotSource,
+    ) -> Self {
         let operator = key.verifying_key();
         let (outbox, inbox) = mpsc::channel(REQUEST_QUEUE_CAPACITY);
         let (events, _) = broadcast::channel(EVENT_QUEUE_CAPACITY);
         tokio::spawn(
-            ReceiptWriter::new(inbox, events.clone(), key, slots).run(),
+            ReceiptWriter::new(inbox, events.clone(), ledger, key, slots).run(),
         );
         Self {
             outbox,
@@ -63,10 +71,22 @@ impl ReceiptStamper {
             reply,
         };
         self.outbox
-            .send(request)
+            .send(WriterCommand::Stamp(request))
             .await
             .map_err(|_| StampError::WriterGone)?;
         answer.await.map_err(|_| StampError::WriterGone)?
+    }
+
+    /// Records what became of an already-sequenced transaction.
+    ///
+    /// Ordered behind the stamp that created `seq`, because both travel the
+    /// same channel and callers await their receipt first. Failure leaves the
+    /// receipt `Pending`, which reads as "unknown" rather than as a fault.
+    pub async fn record_outcome(&self, seq: u64, outcome: Outcome) {
+        let command = WriterCommand::RecordOutcome { seq, outcome };
+        if self.outbox.send(command).await.is_err() {
+            error!(seq, "receipt writer gone; outcome stays pending");
+        }
     }
 
     /// Tails every receipt in sequence order, from now on.
@@ -80,6 +100,7 @@ mod tests {
     use mb_receipt::{
         tx_hash, Mode, ReceiptError, GENESIS_PREV_HASH, ZERO_SIG,
     };
+    use solana_signature::Signature;
     use tokio::task::JoinSet;
 
     use super::*;
@@ -234,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn a_dead_writer_surfaces_as_an_error_rather_than_a_hang() {
         let stamper = {
-            let (outbox, inbox) = mpsc::channel(1);
+            let (outbox, inbox) = mpsc::channel::<WriterCommand>(1);
             let (events, _) = broadcast::channel(1);
             drop(inbox);
             ReceiptStamper {
@@ -253,5 +274,128 @@ mod tests {
             .await;
 
         assert_eq!(result.unwrap_err(), StampError::WriterGone);
+    }
+
+    /// Forces every command queued before this point to have been handled.
+    ///
+    /// The inbox is FIFO with a single consumer, so once a later stamp has
+    /// replied, everything sent earlier — including fire-and-forget outcome
+    /// updates — has already been applied. No sleeping, no polling.
+    async fn barrier(stamper: &ReceiptStamper) {
+        stamper
+            .stamp(
+                fixtures::tx_sig(0xFE),
+                fixtures::wire_bytes(0xFE),
+                fixtures::blockhash(0xFE),
+            )
+            .await
+            .expect("barrier stamp must succeed");
+    }
+
+    #[tokio::test]
+    async fn a_receipt_is_persisted_before_the_caller_ever_sees_it() {
+        let (stamper, ledger) = fixtures::stamper_with_ledger();
+
+        let signed = stamper
+            .stamp(
+                fixtures::tx_sig(1),
+                fixtures::wire_bytes(1),
+                fixtures::blockhash(1),
+            )
+            .await
+            .unwrap();
+
+        // Read immediately: no barrier, because the write must already have
+        // happened by the time the reply arrived.
+        let (outcome, stored) = ledger.read_receipt(0).unwrap().unwrap();
+        assert_eq!(outcome, Outcome::Pending.as_u8());
+        assert_eq!(SignedReceipt::from_bytes(&stored).unwrap(), signed);
+
+        let by_sig = ledger
+            .read_receipt_by_signature(Signature::from(fixtures::tx_sig(1)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_sig.0, 0);
+        assert_eq!(by_sig.2, stored);
+    }
+
+    #[tokio::test]
+    async fn recording_an_outcome_leaves_the_signed_receipt_untouched() {
+        let (stamper, ledger) = fixtures::stamper_with_ledger();
+        let signed = stamper
+            .stamp(
+                fixtures::tx_sig(1),
+                fixtures::wire_bytes(1),
+                fixtures::blockhash(1),
+            )
+            .await
+            .unwrap();
+
+        stamper.record_outcome(0, Outcome::Rejected).await;
+        barrier(&stamper).await;
+
+        let (outcome, stored) = ledger.read_receipt(0).unwrap().unwrap();
+        assert_eq!(outcome, Outcome::Rejected.as_u8());
+        assert_eq!(SignedReceipt::from_bytes(&stored).unwrap(), signed);
+    }
+
+    /// The watchtower's actual read path: scan the persisted log, decode each
+    /// row, and check the chain end to end without ever talking to the node.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_persisted_log_replays_a_verifiable_chain() {
+        let (stamper, ledger) = fixtures::stamper_with_ledger();
+        let operator = fixtures::operator_key().verifying_key();
+
+        let mut jobs = JoinSet::new();
+        for i in 0..16u8 {
+            let stamper = stamper.clone();
+            jobs.spawn(async move {
+                stamper
+                    .stamp(
+                        fixtures::tx_sig(i),
+                        fixtures::wire_bytes(i),
+                        fixtures::blockhash(i),
+                    )
+                    .await
+                    .unwrap()
+            });
+        }
+        while jobs.join_next().await.is_some() {}
+
+        let replayed: Vec<SignedReceipt> = ledger
+            .iter_receipts(0)
+            .unwrap()
+            .map(|(_, _, bytes)| SignedReceipt::from_bytes(&bytes).unwrap())
+            .collect();
+
+        assert_eq!(replayed.len(), 16);
+        assert_eq!(replayed[0].receipt.prev_receipt_hash, GENESIS_PREV_HASH);
+        for (position, signed) in replayed.iter().enumerate() {
+            assert_eq!(signed.receipt.seq, position as u64);
+            assert!(signed.verify(&operator).is_ok());
+        }
+        for pair in replayed.windows(2) {
+            assert_eq!(
+                pair[1].receipt.prev_receipt_hash,
+                pair[0].receipt_hash()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_outcome_for_an_unknown_sequence_is_survivable() {
+        let stamper = fixtures::stamper();
+        stamper.record_outcome(999, Outcome::Accepted).await;
+
+        // The writer must still be alive and sequencing from zero.
+        let signed = stamper
+            .stamp(
+                fixtures::tx_sig(1),
+                fixtures::wire_bytes(1),
+                fixtures::blockhash(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(signed.receipt.seq, 0);
     }
 }

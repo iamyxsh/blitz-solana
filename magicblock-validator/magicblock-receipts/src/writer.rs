@@ -1,14 +1,21 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ed25519_dalek::SigningKey;
+use magicblock_ledger::Ledger;
 use mb_receipt::{
-    tx_hash, Mode, Receipt, SignedReceipt, GENESIS_PREV_HASH, LEN_HASH,
-    LEN_TX_SIG, ZERO_PUBKEY,
+    tx_hash, Mode, Outcome, Receipt, SignedReceipt, GENESIS_PREV_HASH,
+    LEN_HASH, LEN_TX_SIG, ZERO_PUBKEY,
 };
+use solana_signature::Signature;
 use tokio::sync::{broadcast, mpsc};
+use tracing::error;
 
 use crate::{
-    error::StampError, request::StampRequest, slot_source::SlotSource,
+    command::WriterCommand, error::StampError, request::StampRequest,
+    slot_source::SlotSource,
 };
 
 /// The only task permitted to assign a sequence number, advance the chain, or
@@ -16,8 +23,9 @@ use crate::{
 /// the single-writer property is enforced by ownership rather than by
 /// discipline at each call site.
 pub(crate) struct ReceiptWriter {
-    inbox: mpsc::Receiver<StampRequest>,
+    inbox: mpsc::Receiver<WriterCommand>,
     events: broadcast::Sender<SignedReceipt>,
+    ledger: Arc<Ledger>,
     key: SigningKey,
     slots: SlotSource,
     seq: u64,
@@ -26,14 +34,16 @@ pub(crate) struct ReceiptWriter {
 
 impl ReceiptWriter {
     pub(crate) fn new(
-        inbox: mpsc::Receiver<StampRequest>,
+        inbox: mpsc::Receiver<WriterCommand>,
         events: broadcast::Sender<SignedReceipt>,
+        ledger: Arc<Ledger>,
         key: SigningKey,
         slots: SlotSource,
     ) -> Self {
         Self {
             inbox,
             events,
+            ledger,
             key,
             slots,
             seq: 0,
@@ -42,19 +52,38 @@ impl ReceiptWriter {
     }
 
     pub(crate) async fn run(mut self) {
-        while let Some(request) = self.inbox.recv().await {
-            let StampRequest {
-                tx_sig,
-                wire_bytes,
-                recent_blockhash,
-                reply,
-            } = request;
-
-            let result = self.stamp(tx_sig, &wire_bytes, recent_blockhash);
-            if let Ok(receipt) = &result {
-                let _ = self.events.send(receipt.clone());
+        while let Some(command) = self.inbox.recv().await {
+            match command {
+                WriterCommand::Stamp(request) => self.handle_stamp(request),
+                WriterCommand::RecordOutcome { seq, outcome } => {
+                    self.handle_outcome(seq, outcome)
+                }
             }
-            let _ = reply.send(result);
+        }
+    }
+
+    fn handle_stamp(&mut self, request: StampRequest) {
+        let StampRequest {
+            tx_sig,
+            wire_bytes,
+            recent_blockhash,
+            reply,
+        } = request;
+
+        let result = self.stamp(tx_sig, &wire_bytes, recent_blockhash);
+        if let Ok(receipt) = &result {
+            let _ = self.events.send(receipt.clone());
+        }
+        let _ = reply.send(result);
+    }
+
+    fn handle_outcome(&self, seq: u64, outcome: Outcome) {
+        match self.ledger.set_receipt_outcome(seq, outcome.as_u8()) {
+            Ok(true) => (),
+            Ok(false) => {
+                error!(seq, "no stored receipt to record an outcome against")
+            }
+            Err(error) => error!(%error, seq, "failed to record outcome"),
         }
     }
 
@@ -75,10 +104,22 @@ impl ReceiptWriter {
             ingress_slot: (self.slots)(),
             t_ingress_micros: now_micros(),
         };
-
-        // Advancing only after a successful signature keeps the log dense: a
-        // refused receipt must not consume a seq or break the chain.
         let signed = receipt.sign(&self.key)?;
+
+        // Persisted before the caller ever sees it. A receipt handed out but
+        // not recorded would leave the client holding a signed statement this
+        // node has no memory of, which is indistinguishable from equivocation.
+        self.ledger
+            .write_receipt(
+                self.seq,
+                Signature::from(tx_sig),
+                Outcome::Pending.as_u8(),
+                &signed.to_bytes(),
+            )
+            .map_err(|error| StampError::Storage(error.to_string()))?;
+
+        // Advancing only after both the signature and the write succeed keeps
+        // the log dense: a refused receipt must not consume a seq.
         self.seq += 1;
         self.prev_receipt_hash = signed.receipt_hash();
         Ok(signed)

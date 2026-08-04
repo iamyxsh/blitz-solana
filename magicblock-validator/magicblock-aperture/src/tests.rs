@@ -45,6 +45,7 @@ fn ws_channel() -> (WsConnectionChannel, Receiver<Bytes>) {
 fn receipts(ledger: &Arc<magicblock_ledger::Ledger>) -> ReceiptStamper {
     let block = ledger.latest_block().clone();
     ReceiptStamper::spawn(
+        ledger.clone(),
         ed25519_dalek::SigningKey::from_bytes(&[0x07; 32]),
         Box::new(move || block.load().slot),
     )

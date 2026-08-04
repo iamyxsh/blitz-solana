@@ -411,6 +411,7 @@ impl MagicValidator {
         let receipts = {
             let block = ledger.latest_block().clone();
             ReceiptStamper::spawn(
+                ledger.clone(),
                 operator_signing_key(&validator_authority()),
                 Box::new(move || block.load().slot),
             )

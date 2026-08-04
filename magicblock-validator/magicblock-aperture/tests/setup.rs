@@ -94,6 +94,7 @@ pub const OPERATOR_SECRET: [u8; 32] = [0x07; 32];
 fn receipts(ledger: &Arc<magicblock_ledger::Ledger>) -> ReceiptStamper {
     let block = ledger.latest_block().clone();
     ReceiptStamper::spawn(
+        ledger.clone(),
         ed25519_dalek::SigningKey::from_bytes(&OPERATOR_SECRET),
         Box::new(move || block.load().slot),
     )

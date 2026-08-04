@@ -32,6 +32,8 @@ pub enum LedgerError {
     SlotCleanedUp,
     #[error("try from slice error: {0}")]
     TryFromSliceError(#[from] std::array::TryFromSliceError),
+    #[error("receipt at seq {0} is too short to hold an outcome byte")]
+    ReceiptCorrupted(u64),
     #[error("BlockstoreProcessorError: {0}")]
     BlockStoreProcessor(String),
 }

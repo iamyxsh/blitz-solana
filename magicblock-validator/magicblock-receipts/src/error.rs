@@ -6,4 +6,6 @@ pub enum StampError {
     WriterGone,
     #[error("refused to sign an invalid receipt: {0}")]
     Invalid(#[from] ReceiptError),
+    #[error("could not persist the receipt: {0}")]
+    Storage(String),
 }

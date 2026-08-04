@@ -10,6 +10,7 @@ edition.workspace = true
 [dependencies]
 mb-receipt = { workspace = true }
 magicblock-core = { workspace = true }
+magicblock-ledger = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
@@ -17,6 +18,8 @@ tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 # needs the 2.x API, which solana-keypair 3.1 already resolves to.
 ed25519-dalek = "2"
 solana-keypair = { workspace = true }
+solana-signature = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
@@ -24,3 +27,4 @@ solana-signer = { workspace = true }
 solana-signature = { workspace = true }
 bs58 = { workspace = true }
 hex = "0.4"
+tempfile = { workspace = true }
