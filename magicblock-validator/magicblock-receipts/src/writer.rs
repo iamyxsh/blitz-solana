@@ -14,8 +14,8 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::error;
 
 use crate::{
-    command::WriterCommand, error::StampError, request::StampRequest,
-    slot_source::SlotSource,
+    command::WriterCommand, equivocation::Equivocation, error::StampError,
+    request::StampRequest, slot_source::SlotSource,
 };
 
 /// The only task permitted to assign a sequence number, advance the chain, or
@@ -30,6 +30,9 @@ pub(crate) struct ReceiptWriter {
     slots: SlotSource,
     seq: u64,
     prev_receipt_hash: [u8; LEN_HASH],
+    equivocation: Equivocation,
+    /// The copy that went to storage, awaiting broadcast.
+    published: Option<SignedReceipt>,
 }
 
 impl ReceiptWriter {
@@ -48,6 +51,8 @@ impl ReceiptWriter {
             slots,
             seq: 0,
             prev_receipt_hash: GENESIS_PREV_HASH,
+            equivocation: Equivocation::from_env(),
+            published: None,
         }
     }
 
@@ -71,8 +76,9 @@ impl ReceiptWriter {
         } = request;
 
         let result = self.stamp(tx_sig, &wire_bytes, recent_blockhash);
-        if let Ok(receipt) = &result {
-            let _ = self.events.send(receipt.clone());
+        // Subscribers see the published copy, which is what the log holds.
+        if let Some(published) = self.published.take() {
+            let _ = self.events.send(published);
         }
         let _ = reply.send(result);
     }
@@ -104,7 +110,20 @@ impl ReceiptWriter {
             ingress_slot: (self.slots)(),
             t_ingress_micros: now_micros(),
         };
-        let signed = receipt.sign(&self.key)?;
+        let signed = receipt.clone().sign(&self.key)?;
+
+        // Under the equivocation attack the node publishes a *different*
+        // statement about this same position. Only `tx_hash` differs, so the
+        // log stays internally perfect — signatures still map to receipts and
+        // the chain still links — and the sole contradiction is between what
+        // the client was handed and what anyone else can read.
+        let published = if self.equivocation.is_enabled() {
+            let mut tampered = receipt;
+            tampered.tx_hash[0] ^= 0xFF;
+            tampered.sign(&self.key)?
+        } else {
+            signed.clone()
+        };
 
         // Persisted before the caller ever sees it. A receipt handed out but
         // not recorded would leave the client holding a signed statement this
@@ -114,14 +133,15 @@ impl ReceiptWriter {
                 self.seq,
                 Signature::from(tx_sig),
                 Outcome::Pending.as_u8(),
-                &signed.to_bytes(),
+                &published.to_bytes(),
             )
             .map_err(|error| StampError::Storage(error.to_string()))?;
 
         // Advancing only after both the signature and the write succeed keeps
         // the log dense: a refused receipt must not consume a seq.
         self.seq += 1;
-        self.prev_receipt_hash = signed.receipt_hash();
+        self.prev_receipt_hash = published.receipt_hash();
+        self.published = Some(published);
         Ok(signed)
     }
 }

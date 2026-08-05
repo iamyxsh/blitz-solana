@@ -16,6 +16,12 @@ pub enum Undetermined {
     UnverifiableBlock { slot: u64 },
     /// A conflicting pair where at least one side has no receipt to compare.
     MissingReceipt { slot: u64 },
+    /// The block hash a receipt names is outside the window the watchtower
+    /// still remembers, so no timing claim about it can be checked.
+    UnknownBlockhash { seq: u64 },
+    /// Receipted but not yet seen in a block, and still within its grace
+    /// period. Absence this fresh is indistinguishable from lag.
+    NotYetExecuted { seq: u64 },
     /// A conflicting pair involving operator-issued work. A just-in-time
     /// clone is created after the request it serves yet must execute before
     /// it, which is indistinguishable here from deliberate insertion.

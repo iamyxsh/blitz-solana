@@ -32,6 +32,11 @@ fn main() {
     // which is what makes their relative order meaningful.
     let destination = Pubkey::new_unique();
 
+    // The client keeps every receipt it is handed. Equivocation is only
+    // visible when someone can hold the node's promise up against the node's
+    // published log, and this file is that half of the evidence.
+    let mut held: Vec<String> = Vec::new();
+
     for index in 0..count {
         let payer = Keypair::new();
         let txn = solana_system_transaction::transfer(&payer, &destination, 1_000, blockhash);
@@ -43,6 +48,9 @@ fn main() {
             "sendTransaction",
             json!([encoded, {"skipPreflight": true}]),
         );
+        if let Some(receipt) = response.pointer("/result/receipt").and_then(Value::as_str) {
+            held.push(receipt.to_owned());
+        }
         match response.get("result") {
             Some(result) => println!(
                 "{index}: seq {} · {}",
@@ -52,6 +60,11 @@ fn main() {
             None => println!("{index}: {}", response["error"]),
         }
     }
+
+    let path = "client-receipts.json";
+    std::fs::write(path, serde_json::to_string_pretty(&held).unwrap())
+        .expect("client receipts should be writable");
+    println!("kept {} receipts in {path}", held.len());
 }
 
 /// Reads the sequence number back out of the receipt the node returned.

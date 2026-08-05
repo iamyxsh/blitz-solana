@@ -20,12 +20,18 @@ pub enum Attack {
     /// reordered — which is precisely the divergence receipts exist to catch,
     /// and the one nothing in the vanilla validator can express.
     ReorderSwap,
+    /// Receipt a transaction and then never forward it.
+    ///
+    /// The client holds a signed promise of a position that the operator
+    /// never intends to give it.
+    Withhold,
 }
 
 impl Attack {
     fn parse(raw: &str) -> Option<Self> {
         match raw.trim() {
             "reorder-swap" => Some(Attack::ReorderSwap),
+            "withhold" => Some(Attack::Withhold),
             _ => None,
         }
     }
@@ -76,6 +82,17 @@ impl AttackRig {
     pub fn intercept(&self, transaction: Forwardable) -> Vec<Forwardable> {
         match self.mode {
             Attack::None => vec![transaction],
+            // Every third transaction vanishes, so an observer sees the log
+            // continue around a hole rather than simply stop.
+            Attack::Withhold => {
+                let mut held = self.held.lock().expect("attack rig poisoned");
+                let swallowed = held.take().is_none();
+                if swallowed {
+                    *held = Some(transaction);
+                    return Vec::new();
+                }
+                vec![transaction]
+            }
             Attack::ReorderSwap => {
                 let mut held = self.held.lock().expect("attack rig poisoned");
                 match held.take() {

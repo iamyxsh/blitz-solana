@@ -1,7 +1,7 @@
 use ed25519_dalek::VerifyingKey;
 use mb_receipt::{GENESIS_PREV_HASH, SignedReceipt};
 
-use crate::{order::fold, reordered_transaction::ReorderedTransaction};
+use crate::{execution::Execution, order::fold, reordered_transaction::ReorderedTransaction};
 
 /// Attributable operator misbehaviour, carrying everything needed to check it.
 ///
@@ -36,6 +36,32 @@ pub enum Fault {
         index: u32,
         signature: [u8; 64],
         wire_bytes: Vec<u8>,
+    },
+    /// A transaction that ran far later than the operator's own receipt says
+    /// it arrived.
+    Withheld {
+        receipt: SignedReceipt,
+        execution: Execution,
+        held: u64,
+    },
+    /// A transaction the operator receipted and then never ran.
+    ///
+    /// Unlike the others this is a claim about an absence, so it cannot be
+    /// re-derived from the object alone: a verifier has to check the block
+    /// range themselves. `verify` confirms the receipt is genuine and leaves
+    /// the search to the reader.
+    Absent {
+        receipt: SignedReceipt,
+        head: u64,
+        waited: u64,
+    },
+    /// A receipt whose own fields contradict each other: it claims to have
+    /// arrived before its block hash existed, or long after that hash would
+    /// have been refused.
+    ImpossibleIngress {
+        receipt: SignedReceipt,
+        blockhash_slot: u64,
+        max_blockhash_age: u64,
     },
     /// Two conflicting transactions executed in the opposite order to the one
     /// the operator signed for them.
@@ -74,6 +100,10 @@ pub enum FaultError {
     NotAtClaimedIndex,
     #[error("execution order agrees with receipt order, so nothing jumped")]
     OrderRespected,
+    #[error("the transaction ran within the allowed delay")]
+    DeliveredInTime,
+    #[error("the ingress slot is consistent with the block hash it names")]
+    IngressPossible,
 }
 
 impl Fault {
@@ -84,6 +114,9 @@ impl Fault {
             | Fault::Unverifiable { seq, .. } => *seq,
             Fault::BadOrigin { receipt } => receipt.receipt.seq,
             Fault::Unticketed { .. } => u64::MAX,
+            Fault::Withheld { receipt, .. }
+            | Fault::Absent { receipt, .. }
+            | Fault::ImpossibleIngress { receipt, .. } => receipt.receipt.seq,
             Fault::Reorder { jumped, .. } => jumped.receipt.receipt.seq,
         }
     }
@@ -144,6 +177,34 @@ impl Fault {
                         a: receipt.receipt.seq,
                         b: *seq,
                     });
+                }
+                Ok(())
+            }
+            Fault::Withheld {
+                receipt,
+                execution,
+                held,
+            } => {
+                signed(receipt, operator)?;
+                if execution.slot < receipt.receipt.ingress_slot
+                    || execution.slot - receipt.receipt.ingress_slot != *held
+                {
+                    return Err(FaultError::DeliveredInTime);
+                }
+                Ok(())
+            }
+            Fault::Absent { receipt, .. } => signed(receipt, operator),
+            Fault::ImpossibleIngress {
+                receipt,
+                blockhash_slot,
+                max_blockhash_age,
+            } => {
+                signed(receipt, operator)?;
+                let ingress = receipt.receipt.ingress_slot;
+                let impossible = ingress < *blockhash_slot
+                    || ingress.saturating_sub(*blockhash_slot) > *max_blockhash_age;
+                if !impossible {
+                    return Err(FaultError::IngressPossible);
                 }
                 Ok(())
             }

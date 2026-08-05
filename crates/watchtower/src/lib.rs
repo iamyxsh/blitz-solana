@@ -1,5 +1,7 @@
+pub mod blockhash_slots;
 pub mod client;
 pub mod conflict;
+pub mod execution;
 pub mod fault;
 pub mod observed_block;
 pub mod observed_transaction;
@@ -10,10 +12,13 @@ pub mod reordered_transaction;
 pub mod scan;
 pub mod undetermined;
 pub mod verdict;
+pub mod withholding;
 
 pub mod equivocation;
 
+pub use blockhash_slots::BlockhashSlots;
 pub use equivocation::scan_receipts;
+pub use execution::Execution;
 pub use fault::{Fault, FaultError};
 pub use observed_block::ObservedBlock;
 pub use observed_transaction::ObservedTransaction;
@@ -23,3 +28,4 @@ pub use reordered_transaction::ReorderedTransaction;
 pub use scan::Scan;
 pub use undetermined::Undetermined;
 pub use verdict::Verdict;
+pub use withholding::{Patience, scan_withholding};
