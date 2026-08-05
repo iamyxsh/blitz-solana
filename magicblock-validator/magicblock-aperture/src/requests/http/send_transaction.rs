@@ -78,16 +78,22 @@ impl HttpDispatcher {
 
         // Based on the preflight flag, either execute and await the result,
         // or schedule (fire-and-forget) for background processing.
-        let scheduled = if config.skip_preflight {
-            TRANSACTION_SKIP_PREFLIGHT.inc();
-            self.transactions_scheduler
-                .schedule_receipted(transaction)
-                .await
-        } else {
-            self.transactions_scheduler
-                .execute_receipted(transaction)
-                .await
-        };
+        //
+        // The attack rig sits between the receipt and the scheduler, the only
+        // place a reorder can be staged without disturbing the log itself.
+        let mut scheduled = Ok(());
+        for transaction in self.attack.intercept(transaction) {
+            scheduled = if config.skip_preflight {
+                TRANSACTION_SKIP_PREFLIGHT.inc();
+                self.transactions_scheduler
+                    .schedule_receipted(transaction)
+                    .await
+            } else {
+                self.transactions_scheduler
+                    .execute_receipted(transaction)
+                    .await
+            };
+        }
 
         // A transaction the scheduler took holds a position in a block even
         // if execution then reverted. Only failing to reach the scheduler

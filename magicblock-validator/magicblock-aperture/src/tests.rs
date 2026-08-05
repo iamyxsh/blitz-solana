@@ -83,6 +83,7 @@ mod event_processor {
             env.ledger.clone(),
             Arc::new(chainlink(&env.accountsdb)),
             receipts(&env.ledger),
+            Arc::new(crate::attack::AttackRig::disabled()),
         );
         let cancel = CancellationToken::new();
         let config = ApertureConfig::default();
@@ -116,6 +117,7 @@ mod event_processor {
             env.ledger.clone(),
             Arc::new(chainlink(&env.accountsdb)),
             receipts(&env.ledger),
+            Arc::new(crate::attack::AttackRig::disabled()),
         );
         let recovered = LatestBlockInner::new(2, BlockHash::new_unique(), 1);
         env.ledger.latest_block().store(recovered.clone());

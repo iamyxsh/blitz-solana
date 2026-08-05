@@ -117,6 +117,7 @@ impl JsonRpcServer {
     }
 }
 
+pub mod attack;
 mod encoder;
 pub mod error;
 mod geyser;

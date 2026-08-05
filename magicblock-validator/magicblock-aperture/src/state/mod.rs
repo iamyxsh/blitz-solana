@@ -7,6 +7,8 @@ use magicblock_accounts_db::AccountsDb;
 use magicblock_chainlink::{ProdChainlink, ProdInnerChainlink};
 use magicblock_ledger::Ledger;
 use magicblock_receipts::ReceiptStamper;
+
+use crate::attack::AttackRig;
 use solana_feature_set::FeatureSet;
 use solana_pubkey::Pubkey;
 use subscriptions::SubscriptionsDb;
@@ -41,6 +43,8 @@ pub struct SharedState {
     pub(crate) subscriptions: SubscriptionsDb,
     /// Assigns and signs the ingress-order receipt for every transaction.
     pub(crate) receipts: ReceiptStamper,
+    /// Deliberate misbehaviour, off unless `MB_ATTACK` is set.
+    pub(crate) attack: Arc<AttackRig>,
 }
 
 /// Holds the core configuration and runtime parameters that define the node's operational context.
@@ -72,6 +76,7 @@ impl SharedState {
         ledger: Arc<Ledger>,
         chainlink: Arc<ChainlinkImpl>,
         receipts: ReceiptStamper,
+        attack: Arc<AttackRig>,
     ) -> Self {
         const TRANSACTIONS_CACHE_TTL: Duration = Duration::from_secs(75);
         let block = ledger.latest_block().load();
@@ -88,6 +93,7 @@ impl SharedState {
             chainlink,
             subscriptions: Default::default(),
             receipts,
+            attack,
         }
     }
 }

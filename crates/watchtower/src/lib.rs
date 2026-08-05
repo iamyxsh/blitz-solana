@@ -1,8 +1,10 @@
+pub mod client;
 pub mod conflict;
 pub mod fault;
 pub mod observed_block;
 pub mod observed_transaction;
 pub mod order;
+pub mod parse;
 pub mod reorder;
 pub mod reordered_transaction;
 pub mod scan;

@@ -10,7 +10,34 @@ name = "mb_watchtower"
 path = "src/lib.rs"
 
 [dependencies]
+base64 = { workspace = true }
+bincode = { workspace = true }
 blake3 = { workspace = true }
-mb-receipt = { workspace = true }
+bs58 = { workspace = true }
 ed25519-dalek = { workspace = true }
+mb-receipt = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+solana-hash = { workspace = true }
+solana-message = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-signature = { workspace = true }
+solana-transaction = { workspace = true }
 thiserror = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+solana-keypair = { workspace = true }
+solana-signer = { workspace = true }
+solana-system-transaction = { workspace = true }
+solana-hash = { workspace = true }
+solana-pubkey = { workspace = true }
+bs58 = { workspace = true }
+bincode = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+base64 = { workspace = true }
+
+[[bin]]
+name = "mb-watchtower"
+path = "src/main.rs"

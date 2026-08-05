@@ -429,6 +429,7 @@ impl MagicValidator {
             ledger.clone(),
             chainlink.clone(),
             receipts,
+            Arc::new(magicblock_aperture::attack::AttackRig::from_env()),
         );
         let step_start = Instant::now();
         let (rpc, aperture_events) = prepare_aperture(

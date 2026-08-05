@@ -273,6 +273,7 @@ impl RpcTestEnv {
             execution.ledger.clone(),
             chainlink(&execution.accountsdb),
             receipts,
+            Arc::new(magicblock_aperture::attack::AttackRig::disabled()),
         );
         let cancel = CancellationToken::new();
         let config = ApertureConfig {
