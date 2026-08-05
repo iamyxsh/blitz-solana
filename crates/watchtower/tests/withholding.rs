@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-
 use ed25519_dalek::SigningKey;
 use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_PUBKEY};
-use mb_watchtower::{BlockhashSlots, Execution, Fault, Patience, Undetermined, scan_withholding};
+use mb_watchtower::{
+    BlockhashSlots, Execution, ExecutionIndex, Fault, Patience, Undetermined, scan_withholding,
+};
 
 const BLOCKHASH: [u8; 32] = [0x33; 32];
 const BLOCKHASH_SLOT: u64 = 1_000;
@@ -33,15 +33,17 @@ fn blockhashes() -> BlockhashSlots {
     slots
 }
 
-fn ran_at(receipt: &SignedReceipt, slot: u64) -> HashMap<[u8; 64], Execution> {
-    HashMap::from([(receipt.receipt.tx_sig, Execution { slot, index: 0 })])
+fn ran_at(receipt: &SignedReceipt, slot: u64) -> ExecutionIndex {
+    let mut executed = ExecutionIndex::default();
+    executed.record(
+        receipt.receipt.tx_sig,
+        receipt.receipt.tx_hash,
+        Execution { slot, index: 0 },
+    );
+    executed
 }
 
-fn scan(
-    receipts: &[SignedReceipt],
-    executed: &HashMap<[u8; 64], Execution>,
-    head: u64,
-) -> mb_watchtower::Scan {
+fn scan(receipts: &[SignedReceipt], executed: &ExecutionIndex, head: u64) -> mb_watchtower::Scan {
     scan_withholding(
         receipts,
         executed,
@@ -83,7 +85,7 @@ fn delay_inside_the_grace_period_is_clean() {
 fn a_recent_receipt_with_no_execution_yet_is_undetermined() {
     let receipt = receipt(0, BLOCKHASH_SLOT);
 
-    let scan = scan(&[receipt], &HashMap::new(), BLOCKHASH_SLOT + 3);
+    let scan = scan(&[receipt], &ExecutionIndex::default(), BLOCKHASH_SLOT + 3);
 
     assert!(scan.faults.is_empty(), "{:?}", scan.faults);
     assert_eq!(
@@ -135,7 +137,11 @@ fn a_transaction_held_far_past_its_receipt_is_withheld() {
 fn a_receipted_transaction_that_never_runs_is_absent() {
     let receipt = receipt(0, BLOCKHASH_SLOT);
 
-    let scan = scan(&[receipt], &HashMap::new(), BLOCKHASH_SLOT + 5_000);
+    let scan = scan(
+        &[receipt],
+        &ExecutionIndex::default(),
+        BLOCKHASH_SLOT + 5_000,
+    );
 
     assert_eq!(scan.faults.len(), 1, "{:?}", scan.faults);
     let Fault::Absent { waited, .. } = &scan.faults[0] else {
@@ -243,4 +249,111 @@ fn recording_the_same_blockhash_twice_does_not_grow_the_ring() {
 
     assert_eq!(slots.len(), 1);
     assert_eq!(slots.slot_of(&[1; 32]), Some(1));
+}
+
+// --- v2: commit tickets ---
+
+/// A commit ticket names no transaction signature, so a watchtower that only
+/// looked receipts up by signature would report every revealed commitment as
+/// missing. It is matched by the contents it committed to instead.
+fn commit_ticket(seq: u64, ingress_slot: u64, contents: &[u8]) -> SignedReceipt {
+    Receipt {
+        mode: mb_receipt::Mode::Commit,
+        seq,
+        tx_sig: mb_receipt::ZERO_SIG,
+        tx_hash: mb_receipt::tx_hash(contents),
+        recent_blockhash: [0u8; 32],
+        prev_receipt_hash: [0x44; 32],
+        committer: [0x21; 32],
+        ingress_slot,
+        t_ingress_micros: 1_700_000_000_000_000 + seq,
+    }
+    .sign(&operator())
+    .unwrap()
+}
+
+#[test]
+fn a_revealed_commitment_is_matched_by_its_contents() {
+    let contents = b"the transaction that was promised a place";
+    let ticket = commit_ticket(0, BLOCKHASH_SLOT, contents);
+
+    let mut executed = ExecutionIndex::default();
+    executed.record(
+        [0xAB; 64],
+        mb_receipt::tx_hash(contents),
+        Execution {
+            slot: BLOCKHASH_SLOT + 1,
+            index: 0,
+        },
+    );
+
+    let scan = scan(&[ticket], &executed, BLOCKHASH_SLOT + 5_000);
+
+    assert!(scan.is_clean(), "{scan:?}");
+}
+
+/// Rule 3: a position handed out blind whose contents never arrive. Free to
+/// do without this check, which is what makes speculation cheap.
+#[test]
+fn a_commitment_whose_contents_never_arrive_is_not_revealed() {
+    let ticket = commit_ticket(0, BLOCKHASH_SLOT, b"never produced");
+
+    let scan = scan(
+        &[ticket],
+        &ExecutionIndex::default(),
+        BLOCKHASH_SLOT + 5_000,
+    );
+
+    assert_eq!(scan.faults.len(), 1, "{:?}", scan.faults);
+    let Fault::NotRevealed {
+        receipt, waited, ..
+    } = &scan.faults[0]
+    else {
+        panic!("expected a non-reveal, got {:?}", scan.faults[0]);
+    };
+    assert_eq!(receipt.receipt.committer, [0x21; 32]);
+    assert_eq!(*waited, 5_000);
+    assert_eq!(scan.faults[0].verify(&operator().verifying_key()), Ok(()));
+}
+
+/// Still inside its deadline, so nothing is claimed either way.
+#[test]
+fn a_fresh_commitment_is_undetermined_rather_than_unrevealed() {
+    let ticket = commit_ticket(0, BLOCKHASH_SLOT, b"just committed");
+
+    let scan = scan(&[ticket], &ExecutionIndex::default(), BLOCKHASH_SLOT + 5);
+
+    assert!(scan.faults.is_empty(), "{:?}", scan.faults);
+    assert_eq!(
+        scan.undetermined,
+        vec![Undetermined::NotYetExecuted { seq: 0 }]
+    );
+}
+
+/// A commit ticket is signed before any transaction exists, so it names no
+/// block hash. Judging it against one would accuse every commitment ever made.
+#[test]
+fn a_commit_ticket_is_not_judged_against_a_blockhash_it_never_named() {
+    let ticket = commit_ticket(0, BLOCKHASH_SLOT, b"contents");
+    let mut executed = ExecutionIndex::default();
+    executed.record(
+        [0xAB; 64],
+        mb_receipt::tx_hash(b"contents"),
+        Execution {
+            slot: BLOCKHASH_SLOT,
+            index: 0,
+        },
+    );
+
+    // An empty ring: a plain receipt would be undetermined here.
+    let scan = scan_withholding(
+        &[ticket],
+        &executed,
+        &BlockhashSlots::default(),
+        BLOCKHASH_SLOT + 10,
+        &Patience::default(),
+        &operator().verifying_key(),
+    );
+
+    assert!(scan.is_clean(), "{scan:?}");
 }

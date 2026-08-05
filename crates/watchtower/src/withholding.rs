@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
 use ed25519_dalek::VerifyingKey;
-use mb_receipt::SignedReceipt;
+use mb_receipt::{Mode, SignedReceipt};
 
 use crate::{
-    blockhash_slots::BlockhashSlots, execution::Execution, fault::Fault, scan::Scan,
+    blockhash_slots::BlockhashSlots, execution::ExecutionIndex, fault::Fault, scan::Scan,
     undetermined::Undetermined, verdict::Verdict,
 };
 
@@ -18,6 +16,9 @@ pub struct Patience {
     /// Slots a receipted transaction may fail to appear at all before its
     /// absence is treated as evidence rather than as lag.
     pub absent_slots: u64,
+    /// Slots a promised position may go unclaimed before the promise is
+    /// treated as one nobody ever meant to keep.
+    pub reveal_slots: u64,
     /// The widest gap the node itself will accept between a transaction's
     /// block hash and its arrival: `slot + (400 / blocktime) * 150`, which is
     /// 1200 at the 50ms default. A receipt claiming ingress beyond this is
@@ -25,11 +26,27 @@ pub struct Patience {
     pub max_blockhash_age: u64,
 }
 
+impl Patience {
+    /// Takes the reveal deadline from `MB_REVEAL_DEADLINE_SLOTS` so a
+    /// watchtower and the node it watches can be told the same number.
+    pub fn from_env() -> Self {
+        let fallback = Self::default();
+        Self {
+            reveal_slots: std::env::var("MB_REVEAL_DEADLINE_SLOTS")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(fallback.reveal_slots),
+            ..fallback
+        }
+    }
+}
+
 impl Default for Patience {
     fn default() -> Self {
         Self {
             held_slots: 32,
             absent_slots: 64,
+            reveal_slots: 150,
             max_blockhash_age: 1_200,
         }
     }
@@ -41,7 +58,7 @@ impl Default for Patience {
 /// newest slot the watchtower has seen.
 pub fn scan_withholding(
     receipts: &[SignedReceipt],
-    executed: &HashMap<[u8; 64], Execution>,
+    executed: &ExecutionIndex,
     blockhashes: &BlockhashSlots,
     head: u64,
     patience: &Patience,
@@ -72,6 +89,13 @@ fn check_ingress_is_possible(
     blockhashes: &BlockhashSlots,
     patience: &Patience,
 ) -> Verdict {
+    // A commit ticket is signed before any transaction is seen, so it names
+    // no block hash and there is nothing to place it against. Judging it as
+    // if it did would accuse every commitment ever made.
+    if receipt.receipt.mode == Mode::Commit {
+        return Verdict::Clean;
+    }
+
     let Some(blockhash_slot) = blockhashes.slot_of(&receipt.receipt.recent_blockhash) else {
         return Verdict::CannotDetermine(Undetermined::UnknownBlockhash {
             seq: receipt.receipt.seq,
@@ -96,14 +120,29 @@ fn check_ingress_is_possible(
 /// run at all long after it should have.
 fn check_delivery(
     receipt: &SignedReceipt,
-    executed: &HashMap<[u8; 64], Execution>,
+    executed: &ExecutionIndex,
     head: u64,
     patience: &Patience,
 ) -> Verdict {
     let ingress = receipt.receipt.ingress_slot;
 
-    let Some(execution) = executed.get(&receipt.receipt.tx_sig) else {
+    let Some(execution) = executed.find(receipt) else {
         let waited = head.saturating_sub(ingress);
+        // A commit ticket that was never claimed is a different failure from
+        // a known transaction the operator sat on: nobody ever produced the
+        // contents, and who failed to is the whole question.
+        if receipt.receipt.mode == Mode::Commit {
+            if waited > patience.reveal_slots {
+                return Verdict::Fault(Box::new(Fault::NotRevealed {
+                    receipt: receipt.clone(),
+                    head,
+                    waited,
+                }));
+            }
+            return Verdict::CannotDetermine(Undetermined::NotYetExecuted {
+                seq: receipt.receipt.seq,
+            });
+        }
         if waited > patience.absent_slots {
             return Verdict::Fault(Box::new(Fault::Absent {
                 receipt: receipt.clone(),
@@ -120,6 +159,7 @@ fn check_delivery(
 
     // A transaction may execute in the same slot it arrived, never earlier.
     let held = execution.slot.saturating_sub(ingress);
+    let execution = &execution;
     if execution.slot >= ingress && held > patience.held_slots {
         return Verdict::Fault(Box::new(Fault::Withheld {
             receipt: receipt.clone(),

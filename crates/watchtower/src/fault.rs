@@ -55,6 +55,16 @@ pub enum Fault {
         head: u64,
         waited: u64,
     },
+    /// A position promised blind whose contents were never produced.
+    ///
+    /// Who is at fault depends on the committer: a user who never reveals is
+    /// spamming, an operator who never reveals was speculating — holding
+    /// several positions open and claiming only the profitable one.
+    NotRevealed {
+        receipt: SignedReceipt,
+        head: u64,
+        waited: u64,
+    },
     /// A receipt whose own fields contradict each other: it claims to have
     /// arrived before its block hash existed, or long after that hash would
     /// have been refused.
@@ -116,6 +126,7 @@ impl Fault {
             Fault::Unticketed { .. } => u64::MAX,
             Fault::Withheld { receipt, .. }
             | Fault::Absent { receipt, .. }
+            | Fault::NotRevealed { receipt, .. }
             | Fault::ImpossibleIngress { receipt, .. } => receipt.receipt.seq,
             Fault::Reorder { jumped, .. } => jumped.receipt.receipt.seq,
         }
@@ -193,7 +204,9 @@ impl Fault {
                 }
                 Ok(())
             }
-            Fault::Absent { receipt, .. } => signed(receipt, operator),
+            Fault::Absent { receipt, .. } | Fault::NotRevealed { receipt, .. } => {
+                signed(receipt, operator)
+            }
             Fault::ImpossibleIngress {
                 receipt,
                 blockhash_slot,

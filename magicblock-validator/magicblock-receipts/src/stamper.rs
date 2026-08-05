@@ -3,19 +3,25 @@ use std::sync::Arc;
 use bytes::Bytes;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use magicblock_ledger::Ledger;
-use mb_receipt::{Outcome, SignedReceipt, LEN_HASH, LEN_TX_SIG};
+use mb_receipt::{Outcome, SignedReceipt, LEN_HASH, LEN_PUBKEY, LEN_TX_SIG};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::error;
 
 use crate::{
-    command::WriterCommand, error::StampError, request::StampRequest,
-    slot_source::SlotSource, writer::ReceiptWriter,
+    command::WriterCommand,
+    error::StampError,
+    pending::PendingCommit,
+    request::{CommitRequest, StampRequest},
+    slot_source::SlotSource,
+    writer::ReceiptWriter,
 };
 
 /// Bounds how many callers may queue before `stamp` applies backpressure.
 const REQUEST_QUEUE_CAPACITY: usize = 1024;
 /// Bounds how far a slow subscriber may lag before it starts missing receipts.
 const EVENT_QUEUE_CAPACITY: usize = 4096;
+/// How often unrevealed commitments are aged out.
+const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A cheap, cloneable handle to the receipt writer.
 ///
@@ -40,6 +46,7 @@ impl ReceiptStamper {
         tokio::spawn(
             ReceiptWriter::new(inbox, events.clone(), ledger, key, slots).run(),
         );
+        tokio::spawn(sweep_periodically(outbox.clone()));
         Self {
             outbox,
             events,
@@ -77,6 +84,52 @@ impl ReceiptStamper {
         answer.await.map_err(|_| StampError::WriterGone)?
     }
 
+    /// Assigns a position to a transaction the operator has not seen.
+    ///
+    /// The caller supplies only `sha256(wire_bytes)`. Because the operator
+    /// holds no content when it chooses the position, it cannot have chosen
+    /// the position because of the content — which is the whole difference
+    /// between detecting unfair ordering and preventing it.
+    pub async fn commit(
+        &self,
+        tx_hash: [u8; LEN_HASH],
+        committer: [u8; LEN_PUBKEY],
+    ) -> Result<SignedReceipt, StampError> {
+        let (reply, answer) = oneshot::channel();
+        let request = CommitRequest {
+            tx_hash,
+            committer,
+            reply,
+        };
+        self.outbox
+            .send(WriterCommand::Commit(request))
+            .await
+            .map_err(|_| StampError::WriterGone)?;
+        answer.await.map_err(|_| StampError::WriterGone)?
+    }
+
+    /// Claims the position promised for these contents.
+    ///
+    /// Returns `None` when nothing was committed for them, which is the only
+    /// answer that keeps a position from being taken by content nobody
+    /// promised.
+    pub async fn reveal(
+        &self,
+        tx_hash: [u8; LEN_HASH],
+        tx_sig: [u8; LEN_TX_SIG],
+    ) -> Option<(u64, PendingCommit)> {
+        let (reply, answer) = oneshot::channel();
+        self.outbox
+            .send(WriterCommand::Reveal {
+                tx_hash,
+                tx_sig,
+                reply,
+            })
+            .await
+            .ok()?;
+        answer.await.ok().flatten()
+    }
+
     /// Records what became of an already-sequenced transaction.
     ///
     /// Ordered behind the stamp that created `seq`, because both travel the
@@ -92,6 +145,21 @@ impl ReceiptStamper {
     /// Tails every receipt in sequence order, from now on.
     pub fn subscribe(&self) -> broadcast::Receiver<SignedReceipt> {
         self.events.subscribe()
+    }
+}
+
+/// Nudges the writer to age out unrevealed commitments.
+///
+/// A separate task rather than lazy expiry on the next request: a quiet node
+/// is exactly when an abandoned commitment would otherwise sit unrecorded
+/// forever.
+async fn sweep_periodically(outbox: mpsc::Sender<WriterCommand>) {
+    let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+    loop {
+        ticker.tick().await;
+        if outbox.send(WriterCommand::Sweep).await.is_err() {
+            break;
+        }
     }
 }
 

@@ -12,6 +12,7 @@ async-trait = { workspace = true }
 mb-receipt = { workspace = true }
 magicblock-core = { workspace = true }
 magicblock-ledger = { workspace = true }
+bs58 = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }

@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-
 use ed25519_dalek::VerifyingKey;
-use mb_receipt::SignedReceipt;
 
 use crate::{
     conflict::conflicts, fault::Fault, observed_block::ObservedBlock,
-    observed_transaction::ObservedTransaction, reordered_transaction::ReorderedTransaction,
-    scan::Scan, undetermined::Undetermined, verdict::Verdict,
+    observed_transaction::ObservedTransaction, receipt_index::ReceiptIndex,
+    reordered_transaction::ReorderedTransaction, scan::Scan, undetermined::Undetermined,
+    verdict::Verdict,
 };
 
 /// Checks one block against the receipts the operator issued for it.
@@ -16,7 +14,7 @@ use crate::{
 /// issued rather than relayed.
 pub fn scan_block(
     block: &ObservedBlock,
-    receipts: &HashMap<[u8; 64], SignedReceipt>,
+    receipts: &ReceiptIndex,
     operator: &VerifyingKey,
     identity: &[u8; 32],
 ) -> Scan {
@@ -53,9 +51,9 @@ fn check_ticketed(
     block: &ObservedBlock,
     index: u32,
     txn: &ObservedTransaction,
-    receipts: &HashMap<[u8; 64], SignedReceipt>,
+    receipts: &ReceiptIndex,
 ) -> Verdict {
-    if receipts.contains_key(&txn.signature) {
+    if receipts.find(txn).is_some() {
         return Verdict::Clean;
     }
     Verdict::Fault(Box::new(Fault::Unticketed {
@@ -72,7 +70,7 @@ fn check_pair(
     block: &ObservedBlock,
     (first_index, first): (u32, &ObservedTransaction),
     (second_index, second): (u32, &ObservedTransaction),
-    receipts: &HashMap<[u8; 64], SignedReceipt>,
+    receipts: &ReceiptIndex,
     operator: &VerifyingKey,
     identity: &[u8; 32],
 ) -> Verdict {
@@ -82,10 +80,8 @@ fn check_pair(
         return Verdict::Clean;
     }
 
-    let (Some(first_receipt), Some(second_receipt)) = (
-        receipts.get(&first.signature),
-        receipts.get(&second.signature),
-    ) else {
+    let (Some(first_receipt), Some(second_receipt)) = (receipts.find(first), receipts.find(second))
+    else {
         // Already reported as unticketed; ordering cannot be judged without
         // both receipts.
         return Verdict::CannotDetermine(Undetermined::MissingReceipt { slot: block.slot });

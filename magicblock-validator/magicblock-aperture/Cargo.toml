@@ -37,6 +37,7 @@ magicblock-ledger = { workspace = true }
 magicblock-metrics = { workspace = true }
 magicblock-receipts = { workspace = true }
 mb-receipt = { workspace = true }
+ed25519-dalek = "2"
 magicblock-version = { workspace = true }
 
 # solana

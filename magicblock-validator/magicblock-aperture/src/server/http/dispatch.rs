@@ -257,6 +257,7 @@ impl HttpDispatcher {
                 .await
             }
             GetProgramAccounts => self.get_program_accounts(request),
+            CommitTransaction => self.commit_transaction(request).await,
             GetReceipt => self.get_receipt(request),
             // An iterator-based ledger scan: kept off the RPC runtime workers
             // for the same reason getBlock is.
@@ -297,6 +298,7 @@ impl HttpDispatcher {
             IsBlockhashValid => self.is_blockhash_valid(request),
             MinimumLedgerSlot => self.get_first_available_block(request),
             RequestAirdrop => self.request_airdrop(request).await,
+            RevealTransaction => self.reveal_transaction(request).await,
             SendTransaction => {
                 self.send_transaction(request, remote_account_claims.clone())
                     .await

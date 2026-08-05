@@ -6,6 +6,9 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedTransaction {
     pub signature: [u8; 64],
+    /// `sha256(wire_bytes)` — what a commit ticket binds instead of a
+    /// signature it could not have known.
+    pub tx_hash: [u8; 32],
     /// Identifies operator-issued work: the validator signs its own
     /// transactions with its identity.
     pub fee_payer: [u8; 32],

@@ -104,6 +104,7 @@ pub fn observe(wire_bytes: Vec<u8>) -> Result<ObservedTransaction, ParseError> {
 
     Ok(ObservedTransaction {
         signature,
+        tx_hash: mb_receipt::tx_hash(&wire_bytes),
         fee_payer,
         writable,
         readonly,

@@ -1,9 +1,8 @@
-use std::collections::HashMap;
-
 use ed25519_dalek::SigningKey;
 use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_PUBKEY, tx_hash};
 use mb_watchtower::{
-    Fault, ObservedBlock, ObservedTransaction, Order, Undetermined, order::fold, scan_block,
+    Fault, ObservedBlock, ObservedTransaction, Order, ReceiptIndex, Undetermined, order::fold,
+    scan_block,
 };
 
 const IDENTITY: [u8; 32] = [0xEE; 32];
@@ -20,6 +19,7 @@ fn operator() -> SigningKey {
 fn txn(tag: u8, writable: &[[u8; 32]], readonly: &[[u8; 32]]) -> ObservedTransaction {
     ObservedTransaction {
         signature: [tag; 64],
+        tx_hash: mb_receipt::tx_hash(&[tag; 96]),
         fee_payer: [tag.wrapping_add(1); 32],
         writable: writable.to_vec(),
         readonly: readonly.to_vec(),
@@ -63,14 +63,15 @@ fn receipt_for(seq: u64, txn: &ObservedTransaction) -> SignedReceipt {
     .unwrap()
 }
 
-fn log(entries: &[(u64, &ObservedTransaction)]) -> HashMap<[u8; 64], SignedReceipt> {
-    entries
+fn log(entries: &[(u64, &ObservedTransaction)]) -> ReceiptIndex {
+    let receipts: Vec<SignedReceipt> = entries
         .iter()
-        .map(|(seq, txn)| (txn.signature, receipt_for(*seq, txn)))
-        .collect()
+        .map(|(seq, txn)| receipt_for(*seq, txn))
+        .collect();
+    ReceiptIndex::build(&receipts)
 }
 
-fn scan(block: &ObservedBlock, receipts: &HashMap<[u8; 64], SignedReceipt>) -> mb_watchtower::Scan {
+fn scan(block: &ObservedBlock, receipts: &ReceiptIndex) -> mb_watchtower::Scan {
     scan_block(block, receipts, &operator().verifying_key(), &IDENTITY)
 }
 
@@ -173,7 +174,7 @@ fn an_honest_fifo_block_is_clean() {
 #[test]
 fn an_empty_block_is_clean() {
     let block = block(&[], vec![]);
-    assert!(scan(&block, &HashMap::new()).is_clean());
+    assert!(scan(&block, &ReceiptIndex::default()).is_clean());
 }
 
 // --- Detection ---

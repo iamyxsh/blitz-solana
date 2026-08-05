@@ -401,6 +401,7 @@ const SPL_TOKEN_AMOUNT_RANGE: Range<usize> =
 const TOKEN_PROGRAM_ID: Pubkey =
     Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
+pub(crate) mod commit_transaction;
 pub(crate) mod get_account_info;
 pub(crate) mod get_balance;
 pub(crate) mod get_block;
@@ -428,6 +429,7 @@ pub(crate) mod mocked;
 pub(crate) mod receipt_entry;
 pub(crate) mod receipted_signature;
 pub(crate) mod request_airdrop;
+pub(crate) mod reveal_transaction;
 pub(crate) mod send_transaction;
 pub(crate) mod simulate_transaction;
 mod transaction_validation;

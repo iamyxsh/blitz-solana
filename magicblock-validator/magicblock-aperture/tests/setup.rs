@@ -513,6 +513,29 @@ impl RpcTestEnv {
         body["result"].clone()
     }
 
+    /// As `call`, but returns the whole envelope so errors can be asserted.
+    pub async fn call_raw(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": self.next_request_id(),
+            "method": method,
+            "params": params,
+        });
+        reqwest::Client::new()
+            .post(self.rpc.url())
+            .json(&request)
+            .send()
+            .await
+            .expect("rpc request should succeed")
+            .json()
+            .await
+            .expect("rpc response should be JSON")
+    }
+
     /// Opens a raw websocket and subscribes to the ingress receipt stream.
     ///
     /// `receiptSubscribe` is not part of the Solana RPC surface, so the typed

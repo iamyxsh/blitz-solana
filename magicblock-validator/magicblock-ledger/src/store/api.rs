@@ -1305,7 +1305,12 @@ impl Ledger {
     /// as it went out to the client.
     const RECEIPT_OUTCOME_LEN: usize = 1;
 
-    /// Records a receipt under both indexes.
+    /// Records a receipt, indexed by sequence and — when it has one — by
+    /// transaction signature.
+    ///
+    /// A commit-mode ticket is issued while the operator holds only a content
+    /// hash, so it has no signature to index by and is reachable by sequence
+    /// alone until its transaction is revealed.
     ///
     /// The two puts are not batched, matching `write_transaction`. A crash
     /// between them leaves a `by_seq` row with no signature index, which a
@@ -1313,7 +1318,7 @@ impl Ledger {
     pub fn write_receipt(
         &self,
         seq: u64,
-        signature: Signature,
+        signature: Option<Signature>,
         outcome: u8,
         receipt: &[u8],
     ) -> LedgerResult<()> {
@@ -1323,9 +1328,25 @@ impl Ledger {
         value.extend_from_slice(receipt);
 
         self.receipt_by_seq_cf.put_bytes(seq, &value)?;
-        self.receipt_by_sig_cf
-            .put_bytes(signature, &seq.to_be_bytes())?;
+        if let Some(signature) = signature {
+            self.receipt_by_sig_cf
+                .put_bytes(signature, &seq.to_be_bytes())?;
+        }
         Ok(())
+    }
+
+    /// Points a transaction signature at an already-stored receipt.
+    ///
+    /// A commit-mode ticket is issued before its transaction is known, so it
+    /// enters the log with no signature index. Revealing the transaction is
+    /// the first moment that link can be made.
+    pub fn index_receipt_signature(
+        &self,
+        seq: u64,
+        signature: Signature,
+    ) -> LedgerResult<()> {
+        self.receipt_by_sig_cf
+            .put_bytes(signature, &seq.to_be_bytes())
     }
 
     /// Replaces the outcome byte, leaving the signed receipt untouched.
@@ -1693,7 +1714,7 @@ mod tests {
             ledger
                 .write_receipt(
                     seq,
-                    Signature::from([seq as u8 | 0x80; 64]),
+                    Some(Signature::from([seq as u8 | 0x80; 64])),
                     0x01,
                     &vec![0xAB; 293],
                 )

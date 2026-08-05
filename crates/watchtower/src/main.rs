@@ -7,8 +7,8 @@
 use std::{collections::HashMap, thread::sleep, time::Duration};
 
 use mb_watchtower::{
-    BlockhashSlots, Execution, Fault, Order, Patience, Scan, Undetermined, client::Client,
-    scan_block, scan_receipts, scan_withholding,
+    BlockhashSlots, Execution, ExecutionIndex, Fault, Order, Patience, ReceiptIndex, Scan,
+    Undetermined, client::Client, scan_block, scan_receipts, scan_withholding,
 };
 
 const RECEIPT_PAGE: u64 = 1_000;
@@ -74,15 +74,12 @@ fn watch(
     let mut next_slot = 1;
     let mut totals = Totals::default();
     let mut blockhashes = BlockhashSlots::default();
-    let mut executed: HashMap<[u8; 64], Execution> = HashMap::new();
-    let patience = Patience::default();
+    let mut executed = ExecutionIndex::default();
+    let patience = Patience::from_env();
 
     loop {
         let receipts = client.receipts(0, RECEIPT_PAGE)?;
-        let by_signature: HashMap<[u8; 64], _> = receipts
-            .iter()
-            .map(|signed| (signed.receipt.tx_sig, signed.clone()))
-            .collect();
+        let index = ReceiptIndex::build(&receipts);
 
         // Scanned together: a contradiction between the published log and a
         // receipt the node handed a client is exactly two signed statements
@@ -101,12 +98,13 @@ fn watch(
             if let Some(block) = client.block(next_slot)? {
                 blockhashes.record(block.blockhash, block.slot);
                 if let Some(order) = block.executed_order() {
-                    for (index, txn) in order.iter().enumerate() {
-                        executed.insert(
+                    for (position, txn) in order.iter().enumerate() {
+                        executed.record(
                             txn.signature,
+                            txn.tx_hash,
                             Execution {
                                 slot: block.slot,
-                                index: index as u32,
+                                index: position as u32,
                             },
                         );
                     }
@@ -123,7 +121,7 @@ fn watch(
                         })
                         .or_default() += 1;
                 }
-                let scan = scan_block(&block, &by_signature, &operator, &identity);
+                let scan = scan_block(&block, &index, &operator, &identity);
                 report(&mut totals, &format!("slot {next_slot}"), scan, &operator);
             }
             next_slot += 1;
@@ -270,6 +268,22 @@ fn describe(fault: &Fault) -> String {
             sig(&receipt.receipt.tx_sig),
             receipt.receipt.ingress_slot,
             execution.slot,
+        ),
+        Fault::NotRevealed {
+            receipt,
+            head,
+            waited,
+        } => format!(
+            "  commitment never revealed, seq {}\n\
+             \x20   committer {}\n\
+             \x20   promised at slot {}, still unclaimed at slot {head} after {waited} slots\n\
+             \n  A position was handed out blind and its contents were never\n\
+             \x20 produced. If the committer is the operator, that is\n\
+             \x20 speculation: several positions held, only the profitable\n\
+             \x20 one claimed.",
+            receipt.receipt.seq,
+            bs58::encode(receipt.receipt.committer).into_string(),
+            receipt.receipt.ingress_slot,
         ),
         Fault::Absent {
             receipt,

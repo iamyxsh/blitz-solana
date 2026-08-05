@@ -493,3 +493,277 @@ async fn internal_and_client_transactions_share_one_chain() {
     assert_eq!(log[1].receipt.prev_receipt_hash, log[0].receipt_hash());
     assert!(log[1].verify(&env.operator).is_ok());
 }
+
+// --- v2: commit-reveal ---
+
+/// Commits the hash of some content and returns the raw result.
+async fn commit(
+    env: &RpcTestEnv,
+    contents: &[u8],
+    committer: &ed25519_dalek::SigningKey,
+) -> serde_json::Value {
+    env.call("commitTransaction", commit_params(contents, committer))
+        .await
+}
+
+fn commit_params(
+    contents: &[u8],
+    committer: &ed25519_dalek::SigningKey,
+) -> serde_json::Value {
+    use base64::{prelude::BASE64_STANDARD, Engine};
+    use ed25519_dalek::Signer;
+
+    let hash = mb_receipt::tx_hash(contents);
+    serde_json::json!([
+        BASE64_STANDARD.encode(hash),
+        bs58::encode(committer.verifying_key().to_bytes()).into_string(),
+        BASE64_STANDARD.encode(committer.sign(&hash).to_bytes()),
+    ])
+}
+
+fn decode_ticket(value: &serde_json::Value) -> mb_receipt::SignedReceipt {
+    use base64::{prelude::BASE64_STANDARD, Engine};
+
+    let bytes = BASE64_STANDARD
+        .decode(value["ticket"].as_str().expect("ticket should be a string"))
+        .expect("ticket should be base64");
+    mb_receipt::SignedReceipt::from_bytes(&bytes).expect("ticket decodes")
+}
+
+/// The whole point of commit-reveal: the operator assigns a position while
+/// holding nothing but a hash, so it cannot have chosen that position because
+/// of the contents.
+#[tokio::test]
+async fn a_commit_ticket_names_a_position_without_naming_a_transaction() {
+    let env = RpcTestEnv::new().await;
+    let committer = ed25519_dalek::SigningKey::from_bytes(&[0x21; 32]);
+    let contents = b"a transaction the operator has not seen";
+
+    let ticket = decode_ticket(&commit(&env, contents, &committer).await);
+
+    assert_eq!(ticket.receipt.mode, mb_receipt::Mode::Commit);
+    assert_eq!(
+        ticket.receipt.tx_sig,
+        mb_receipt::ZERO_SIG,
+        "a blind ticket cannot name a signature it has never seen"
+    );
+    assert_eq!(ticket.receipt.tx_hash, mb_receipt::tx_hash(contents));
+    assert_eq!(
+        ticket.receipt.committer,
+        committer.verifying_key().to_bytes()
+    );
+    assert!(ticket.verify(&env.operator).is_ok());
+}
+
+/// Commit tickets share one sequence and one chain with ordinary receipts.
+/// Two sequences would mean two orders, and nothing could be compared.
+#[tokio::test]
+async fn commits_and_plain_receipts_share_one_chain() {
+    let env = RpcTestEnv::new().await;
+    let committer = ed25519_dalek::SigningKey::from_bytes(&[0x21; 32]);
+
+    let first = decode_ticket(&commit(&env, b"first", &committer).await);
+    let (_, plain) = env.send_transaction_ok(&env.build_transfer_txn()).await;
+    let third = decode_ticket(&commit(&env, b"third", &committer).await);
+
+    assert_eq!(first.receipt.seq, 0);
+    assert_eq!(plain.receipt.seq, 1);
+    assert_eq!(third.receipt.seq, 2);
+    assert_eq!(plain.receipt.prev_receipt_hash, first.receipt_hash());
+    assert_eq!(third.receipt.prev_receipt_hash, plain.receipt_hash());
+}
+
+/// Without an authenticated committer, Rule 3 cannot tell a user who failed to
+/// reveal from an operator who speculated — so an unsigned commitment is
+/// refused rather than attributed to whoever was named.
+#[tokio::test]
+async fn a_commitment_signed_by_someone_else_is_refused() {
+    use base64::{prelude::BASE64_STANDARD, Engine};
+    use ed25519_dalek::Signer;
+
+    let env = RpcTestEnv::new().await;
+    let claimed = ed25519_dalek::SigningKey::from_bytes(&[0x21; 32]);
+    let actual = ed25519_dalek::SigningKey::from_bytes(&[0x22; 32]);
+    let hash = mb_receipt::tx_hash(b"not mine to commit");
+
+    let response = env
+        .call_raw(
+            "commitTransaction",
+            serde_json::json!([
+                BASE64_STANDARD.encode(hash),
+                bs58::encode(claimed.verifying_key().to_bytes()).into_string(),
+                BASE64_STANDARD.encode(actual.sign(&hash).to_bytes()),
+            ]),
+        )
+        .await;
+
+    assert!(
+        response.get("error").is_some(),
+        "an unsigned commitment should be refused: {response}"
+    );
+}
+
+/// The full sealed-bid round trip: the position is fixed while the operator
+/// holds a hash, and only then are the contents produced.
+#[tokio::test]
+async fn a_committed_transaction_executes_at_the_position_it_was_promised() {
+    use base64::{prelude::BASE64_STANDARD, Engine};
+
+    let env = RpcTestEnv::new().await;
+    let committer = ed25519_dalek::SigningKey::from_bytes(&[0x21; 32]);
+    let txn = env.build_transfer_txn();
+    let wire = bincode::serialize(&txn).unwrap();
+
+    let ticket = decode_ticket(&commit(&env, &wire, &committer).await);
+    assert_eq!(ticket.receipt.tx_sig, mb_receipt::ZERO_SIG);
+
+    let revealed = env
+        .call(
+            "revealTransaction",
+            serde_json::json!([
+                bs58::encode(&wire).into_string(),
+                {"skipPreflight": true}
+            ]),
+        )
+        .await;
+
+    // It took the position it was promised, not a fresh one.
+    assert_eq!(revealed["seq"].as_u64(), Some(ticket.receipt.seq));
+    assert_eq!(
+        revealed["signature"].as_str().unwrap(),
+        txn.signatures[0].to_string()
+    );
+
+    // The ticket is now reachable by the signature it never contained.
+    let found = env
+        .call(
+            "getReceipt",
+            serde_json::json!([txn.signatures[0].to_string()]),
+        )
+        .await;
+    assert_eq!(found["seq"].as_u64(), Some(ticket.receipt.seq));
+
+    // And the stored ticket is still the blind one, unchanged.
+    let stored = BASE64_STANDARD
+        .decode(found["receipt"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        mb_receipt::SignedReceipt::from_bytes(&stored).unwrap(),
+        ticket
+    );
+}
+
+/// A position may only be claimed by the contents it was promised to.
+#[tokio::test]
+async fn contents_nobody_committed_to_cannot_claim_a_position() {
+    let env = RpcTestEnv::new().await;
+    let txn = env.build_transfer_txn();
+    let wire = bincode::serialize(&txn).unwrap();
+
+    let response = env
+        .call_raw(
+            "revealTransaction",
+            serde_json::json!([bs58::encode(&wire).into_string()]),
+        )
+        .await;
+
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no outstanding commitment"),
+        "{response}"
+    );
+}
+
+/// One commitment, one position. Revealing twice must not let the same
+/// promise be spent again.
+#[tokio::test]
+async fn a_commitment_can_only_be_revealed_once() {
+    let env = RpcTestEnv::new().await;
+    let committer = ed25519_dalek::SigningKey::from_bytes(&[0x21; 32]);
+    let txn = env.build_transfer_txn();
+    let wire = bincode::serialize(&txn).unwrap();
+
+    commit(&env, &wire, &committer).await;
+    let reveal = || {
+        env.call_raw(
+            "revealTransaction",
+            serde_json::json!([
+                bs58::encode(&wire).into_string(),
+                {"skipPreflight": true}
+            ]),
+        )
+    };
+
+    assert!(reveal().await.get("result").is_some());
+    assert!(
+        reveal().await.get("error").is_some(),
+        "a spent commitment must not be claimable again"
+    );
+}
+
+/// The standard weakness of commit-reveal: pre-commit a menu of transactions,
+/// reveal only the profitable one, abandon the rest. Capping how many
+/// positions one committer may hold open bounds the size of that menu.
+#[tokio::test]
+async fn a_committer_cannot_hold_unlimited_positions_open() {
+    let env = RpcTestEnv::new().await;
+    let committer = ed25519_dalek::SigningKey::from_bytes(&[0x21; 32]);
+    let cap = magicblock_receipts::RevealDeadline::default().max_outstanding;
+
+    for index in 0..cap {
+        let contents = format!("menu item {index}");
+        let response = commit(&env, contents.as_bytes(), &committer).await;
+        assert!(
+            response.get("ticket").is_some(),
+            "commitment {index} should be accepted: {response}"
+        );
+    }
+
+    let response = env
+        .call_raw(
+            "commitTransaction",
+            commit_params(b"one too many", &committer),
+        )
+        .await;
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("too many unrevealed"),
+        "{response}"
+    );
+}
+
+/// Revealing frees the position back up, so an honest committer working
+/// steadily is never throttled.
+#[tokio::test]
+async fn revealing_releases_a_committers_allowance() {
+    let env = RpcTestEnv::new().await;
+    let committer = ed25519_dalek::SigningKey::from_bytes(&[0x21; 32]);
+    let cap = magicblock_receipts::RevealDeadline::default().max_outstanding;
+
+    let txn = env.build_transfer_txn();
+    let wire = bincode::serialize(&txn).unwrap();
+    commit(&env, &wire, &committer).await;
+    for index in 1..cap {
+        commit(&env, format!("filler {index}").as_bytes(), &committer).await;
+    }
+
+    // At the cap now; revealing one must make room again.
+    env.call(
+        "revealTransaction",
+        serde_json::json!([
+            bs58::encode(&wire).into_string(),
+            {"skipPreflight": true}
+        ]),
+    )
+    .await;
+
+    let response = commit(&env, b"after a reveal", &committer).await;
+    assert!(
+        response.get("ticket").is_some(),
+        "a released position should be reusable: {response}"
+    );
+}

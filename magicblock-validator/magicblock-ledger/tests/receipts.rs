@@ -29,7 +29,7 @@ fn receipts_round_trip_through_both_indexes() {
     let bytes = receipt_bytes(7);
 
     ledger
-        .write_receipt(7, signature(7), PENDING, &bytes)
+        .write_receipt(7, Some(signature(7)), PENDING, &bytes)
         .unwrap();
 
     assert_eq!(
@@ -39,6 +39,25 @@ fn receipts_round_trip_through_both_indexes() {
     assert_eq!(
         ledger.read_receipt_by_signature(signature(7)).unwrap(),
         Some((7, PENDING, bytes))
+    );
+}
+
+/// A commit-mode ticket is issued before the operator knows the transaction's
+/// signature, so it is reachable by sequence and by nothing else.
+#[test]
+fn a_receipt_with_no_signature_is_stored_by_sequence_alone() {
+    let ledger = setup();
+    let bytes = receipt_bytes(3);
+
+    ledger.write_receipt(3, None, PENDING, &bytes).unwrap();
+
+    assert_eq!(ledger.read_receipt(3).unwrap(), Some((PENDING, bytes)));
+    assert_eq!(ledger.count_receipts().unwrap(), 1);
+    assert_eq!(
+        ledger
+            .read_receipt_by_signature(Signature::default())
+            .unwrap(),
+        None
     );
 }
 
@@ -55,7 +74,7 @@ fn receipts_scan_in_numeric_order_across_byte_boundaries() {
         ledger
             .write_receipt(
                 seq,
-                signature(seq as u8),
+                Some(signature(seq as u8)),
                 PENDING,
                 &receipt_bytes(seq),
             )
@@ -82,7 +101,7 @@ fn an_outcome_update_preserves_the_receipt_bytes() {
     let ledger = setup();
     let bytes = receipt_bytes(3);
     ledger
-        .write_receipt(3, signature(3), PENDING, &bytes)
+        .write_receipt(3, Some(signature(3)), PENDING, &bytes)
         .unwrap();
 
     assert!(ledger.set_receipt_outcome(3, REJECTED).unwrap());
@@ -105,7 +124,7 @@ fn updating_an_unknown_sequence_reports_false_rather_than_failing() {
 fn a_missing_sequence_reads_as_none() {
     let ledger = setup();
     ledger
-        .write_receipt(0, signature(0), PENDING, &receipt_bytes(0))
+        .write_receipt(0, Some(signature(0)), PENDING, &receipt_bytes(0))
         .unwrap();
 
     assert_eq!(ledger.read_receipt(1).unwrap(), None);
@@ -128,7 +147,7 @@ fn receipts_survive_reopening_the_ledger() {
             ledger
                 .write_receipt(
                     seq,
-                    signature(seq as u8),
+                    Some(signature(seq as u8)),
                     PENDING,
                     &receipt_bytes(seq),
                 )

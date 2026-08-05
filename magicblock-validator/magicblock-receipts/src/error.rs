@@ -8,4 +8,8 @@ pub enum StampError {
     Invalid(#[from] ReceiptError),
     #[error("could not persist the receipt: {0}")]
     Storage(String),
+    #[error("the committer did not sign this commitment")]
+    UnsignedCommitment,
+    #[error("committer {0} has too many unrevealed commitments")]
+    TooManyOutstanding(String),
 }
