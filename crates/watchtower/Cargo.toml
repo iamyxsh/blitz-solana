@@ -1,0 +1,16 @@
+[package]
+name = "mb-watchtower"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "mb_watchtower"
+path = "src/lib.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+mb-receipt = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }

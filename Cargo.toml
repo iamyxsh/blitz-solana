@@ -10,7 +10,9 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 mb-constants = { path = "crates/constants" }
+mb-receipt = { path = "crates/receipt" }
 
+blake3 = "1.8"
 ed25519-dalek = "2"
 sha2 = "0.10"
 thiserror = "2"
