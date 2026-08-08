@@ -5,12 +5,13 @@ exclude = ["magicblock-validator"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.85"  # edition 2024 minimum; the SBF toolchain ships 1.89
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 mb-constants = { path = "crates/constants" }
 mb-receipt = { path = "crates/receipt" }
+mb-slashing = { path = "crates/slashing" }
 
 base64 = "0.22"
 bincode = "1.3"
