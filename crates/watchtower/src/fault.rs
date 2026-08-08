@@ -104,6 +104,8 @@ pub enum Fault {
 pub enum FaultError {
     #[error("receipt at seq {0} does not carry a valid operator signature")]
     NotSigned(u64),
+    #[error("the receipts belong to different runs of the log")]
+    MixedLogs,
     #[error("the two receipts are identical, so they do not contradict")]
     NotContradictory,
     #[error("receipts at seq {a} and {b} are not adjacent")]
@@ -156,6 +158,7 @@ impl Fault {
             Fault::Equivocation { seq, a, b } => {
                 signed(a, operator)?;
                 signed(b, operator)?;
+                same_log(a, b)?;
                 if a.receipt.seq != *seq || b.receipt.seq != *seq {
                     return Err(FaultError::NotAdjacent {
                         a: a.receipt.seq,
@@ -174,6 +177,7 @@ impl Fault {
             } => {
                 signed(receipt, operator)?;
                 signed(predecessor, operator)?;
+                same_log(receipt, predecessor)?;
                 if receipt.receipt.seq != *seq || predecessor.receipt.seq + 1 != *seq {
                     return Err(FaultError::NotAdjacent {
                         a: predecessor.receipt.seq,
@@ -217,6 +221,7 @@ impl Fault {
             } => {
                 signed(receipt, operator)?;
                 signed(withdrawal, operator)?;
+                same_log(receipt, withdrawal)?;
 
                 if withdrawal.receipt.mode != Mode::Retract {
                     return Err(FaultError::NotAWithdrawal);
@@ -270,6 +275,7 @@ impl Fault {
             } => {
                 jumped.verify(operator)?;
                 delayed.verify(operator)?;
+                same_log(&jumped.receipt, &delayed.receipt)?;
 
                 if fold(previous_blockhash, executed.iter()) != *blockhash {
                     return Err(FaultError::OrderNotReproduced);
@@ -295,6 +301,18 @@ fn at_index(executed: &[[u8; 64]], txn: &ReorderedTransaction) -> Result<(), Fau
         .filter(|signature| **signature == txn.receipt.receipt.tx_sig)
         .map(|_| ())
         .ok_or(FaultError::NotAtClaimedIndex)
+}
+
+/// Positions only contradict each other inside one run of the log.
+///
+/// Checked between the carried receipts rather than against a configured id,
+/// so the object stays answerable by someone holding nothing but it and the
+/// operator's key — which is the standard the on-chain verifier has to meet.
+fn same_log(a: &SignedReceipt, b: &SignedReceipt) -> Result<(), FaultError> {
+    if a.receipt.log_id != b.receipt.log_id {
+        return Err(FaultError::MixedLogs);
+    }
+    Ok(())
 }
 
 fn signed(receipt: &SignedReceipt, operator: &VerifyingKey) -> Result<(), FaultError> {

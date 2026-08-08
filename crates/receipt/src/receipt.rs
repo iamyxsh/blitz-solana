@@ -6,6 +6,10 @@ use mb_constants::receipt::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
+    /// Which run of the log this belongs to. Sequence numbers restart from
+    /// zero whenever the node does; the signing key does not, so without this
+    /// every entry of a fresh log contradicts the previous incarnation's.
+    pub log_id: [u8; LEN_LOG_ID],
     pub mode: Mode,
     pub seq: u64,
     pub tx_sig: [u8; LEN_TX_SIG],
@@ -26,7 +30,8 @@ fn arr<const N: usize>(buf: &[u8], off: usize) -> [u8; N] {
 impl Receipt {
     pub fn to_bytes(&self) -> [u8; RECEIPT_LEN] {
         let mut out = [0u8; RECEIPT_LEN];
-        out[OFF_DOMAIN_TAG..OFF_MODE].copy_from_slice(DOMAIN_TAG);
+        out[OFF_DOMAIN_TAG..OFF_LOG_ID].copy_from_slice(DOMAIN_TAG);
+        out[OFF_LOG_ID..OFF_MODE].copy_from_slice(&self.log_id);
         out[OFF_MODE] = self.mode.as_u8();
         out[OFF_SEQ..OFF_TX_SIG].copy_from_slice(&self.seq.to_le_bytes());
         out[OFF_TX_SIG..OFF_TX_HASH].copy_from_slice(&self.tx_sig);
@@ -45,11 +50,12 @@ impl Receipt {
         if buf.len() != RECEIPT_LEN {
             return Err(ReceiptError::WrongLength(buf.len()));
         }
-        if &buf[OFF_DOMAIN_TAG..OFF_MODE] != DOMAIN_TAG {
+        if &buf[OFF_DOMAIN_TAG..OFF_LOG_ID] != DOMAIN_TAG {
             return Err(ReceiptError::BadDomainTag);
         }
         let mode_byte = buf[OFF_MODE];
         let receipt = Receipt {
+            log_id: arr(buf, OFF_LOG_ID),
             mode: Mode::from_u8(mode_byte).ok_or(ReceiptError::InvalidMode(mode_byte))?,
             seq: u64::from_le_bytes(arr(buf, OFF_SEQ)),
             tx_sig: arr(buf, OFF_TX_SIG),
@@ -133,7 +139,8 @@ mod tests {
         let bytes = receipt.to_bytes();
 
         assert_eq!(bytes.len(), RECEIPT_LEN);
-        assert_eq!(&bytes[OFF_DOMAIN_TAG..OFF_MODE], b"MBRECEIPT_V1");
+        assert_eq!(&bytes[OFF_DOMAIN_TAG..OFF_LOG_ID], b"MBRECEIPT_V1");
+        assert_eq!(&bytes[OFF_LOG_ID..OFF_MODE], &fixtures::LOG_ID);
         assert_eq!(bytes[OFF_MODE], MODE_PLAIN);
         assert_eq!(&bytes[OFF_TX_SIG..OFF_TX_HASH], &[0xa1; 64]);
         assert_eq!(&bytes[OFF_TX_HASH..OFF_RECENT_BLOCKHASH], &[0xb2; 32]);
@@ -143,6 +150,26 @@ mod tests {
         );
         assert_eq!(&bytes[OFF_PREV_RECEIPT_HASH..OFF_COMMITTER], &[0xd4; 32]);
         assert_eq!(&bytes[OFF_COMMITTER..OFF_INGRESS_SLOT], &ZERO_PUBKEY);
+    }
+
+    /// The whole point of the field. The same statement about two runs of the
+    /// log is two different signed messages, so it can never be read as one
+    /// operator contradicting itself at one position.
+    #[test]
+    fn the_log_id_separates_otherwise_identical_receipts() {
+        let key = fixtures::operator_key();
+        let first = fixtures::plain();
+        let second = Receipt {
+            log_id: [0x01; 32],
+            ..fixtures::plain()
+        };
+
+        assert_eq!(first.seq, second.seq);
+        assert_ne!(first.to_bytes(), second.to_bytes());
+        assert_ne!(
+            first.sign(&key).unwrap().signature,
+            second.sign(&key).unwrap().signature
+        );
     }
 
     #[test]

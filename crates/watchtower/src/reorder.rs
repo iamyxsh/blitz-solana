@@ -1,8 +1,6 @@
-use ed25519_dalek::VerifyingKey;
-
 use crate::{
     conflict::conflicts, execution::Execution, fault::Fault, observed_block::ObservedBlock,
-    observed_transaction::ObservedTransaction, receipt_index::ReceiptIndex,
+    observed_transaction::ObservedTransaction, operator::Operator, receipt_index::ReceiptIndex,
     reordered_transaction::ReorderedTransaction, scan::Scan, undetermined::Undetermined,
     verdict::Verdict,
 };
@@ -15,7 +13,7 @@ use crate::{
 pub fn scan_block(
     block: &ObservedBlock,
     receipts: &ReceiptIndex,
-    operator: &VerifyingKey,
+    operator: &Operator,
     identity: &[u8; 32],
 ) -> Scan {
     let mut scan = Scan::default();
@@ -98,7 +96,7 @@ fn check_pair(
     (first_index, first): (u32, &ObservedTransaction),
     (second_index, second): (u32, &ObservedTransaction),
     receipts: &ReceiptIndex,
-    operator: &VerifyingKey,
+    operator: &Operator,
     identity: &[u8; 32],
 ) -> Verdict {
     // Transactions sharing no written account cannot have front-run each
@@ -114,10 +112,11 @@ fn check_pair(
         return Verdict::CannotDetermine(Undetermined::MissingReceipt { slot: block.slot });
     };
 
-    // Never build an ordering accusation on a receipt that does not verify.
-    // Naming the forgery is `scan_receipts`' job; refusing to reason from it
-    // is this one's.
-    if first_receipt.verify(operator).is_err() || second_receipt.verify(operator).is_err() {
+    // The index already filters, so this cannot fire today. It stays because
+    // the rule belongs at the accusation site: whatever the index does later,
+    // an ordering fault is never built from a receipt this operator did not
+    // sign about this log.
+    if operator.accepts(first_receipt).is_err() || operator.accepts(second_receipt).is_err() {
         return Verdict::CannotDetermine(Undetermined::MissingReceipt { slot: block.slot });
     }
 

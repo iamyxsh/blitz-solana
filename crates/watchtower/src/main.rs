@@ -7,8 +7,8 @@
 use std::{collections::HashMap, thread::sleep, time::Duration};
 
 use mb_watchtower::{
-    BlockhashSlots, Execution, ExecutionIndex, Fault, Order, Patience, ReceiptIndex, Scan,
-    Undetermined, client::Client, scan_block, scan_receipts, scan_withholding,
+    BlockhashSlots, Execution, ExecutionIndex, Fault, Operator, Order, Patience, ReceiptIndex,
+    Scan, Undetermined, client::Client, scan_block, scan_receipts, scan_withholding,
 };
 
 const RECEIPT_PAGE: u64 = 1_000;
@@ -26,10 +26,26 @@ fn main() {
         .position(|arg| arg == "--client-receipts")
         .and_then(|at| args.get(at + 1))
         .cloned();
+    let log_id = args
+        .iter()
+        .position(|arg| arg == "--log-id")
+        .and_then(|at| args.get(at + 1))
+        .map(|value| decode_log_id(value));
 
-    if let Err(error) = watch(&url, once, client_receipts.as_deref()) {
+    if let Err(error) = watch(&url, once, client_receipts.as_deref(), log_id) {
         eprintln!("watchtower stopped: {error}");
         std::process::exit(1);
+    }
+}
+
+fn decode_log_id(value: &str) -> [u8; 32] {
+    let mut log_id = [0u8; 32];
+    match bs58::decode(value).onto(&mut log_id) {
+        Ok(32) => log_id,
+        _ => {
+            eprintln!("--log-id must be 32 base58 bytes");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -54,10 +70,11 @@ fn watch(
     url: &str,
     once: bool,
     client_receipts: Option<&str>,
+    log_id: Option<[u8; 32]>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new(url);
-    let operator = client.operator()?;
-    let identity = operator.to_bytes();
+    let key = client.operator()?;
+    let identity = key.to_bytes();
 
     println!("watching {url}");
     println!("operator {}", bs58::encode(identity).into_string());
@@ -71,6 +88,7 @@ fn watch(
         None => Vec::new(),
     };
 
+    let mut resolved: Option<Operator> = None;
     let mut next_slot = 1;
     let mut totals = Totals::default();
     let mut blockhashes = BlockhashSlots::default();
@@ -79,6 +97,28 @@ fn watch(
 
     loop {
         let receipts = client.receipts(0, RECEIPT_PAGE)?;
+
+        // Which run of the log to follow. Adopting it from the node is a
+        // convenience, not a check: an operator that hands out two log ids
+        // splits its own log, and every transaction receipted under the one
+        // not being followed shows up as unticketed.
+        let operator = match resolved.take() {
+            Some(operator) => operator,
+            None => {
+                let adopted = log_id
+                    .or_else(|| receipts.first().map(|signed| signed.receipt.log_id))
+                    .unwrap_or_default();
+                if log_id.is_none() {
+                    println!(
+                        "log {} (adopted from the node; pin it with --log-id)",
+                        bs58::encode(adopted).into_string()
+                    );
+                }
+                Operator::new(key, adopted)
+            }
+        };
+        resolved = Some(operator);
+
         let index = ReceiptIndex::build(&receipts, &operator);
 
         // Scanned together: a contradiction between the published log and a
@@ -186,6 +226,7 @@ fn reason(undetermined: &Undetermined) -> &'static str {
     match undetermined {
         Undetermined::SequenceGap { .. } => "sequence gap",
         Undetermined::MissingOrigin { .. } => "log does not start at zero",
+        Undetermined::ForeignLog { .. } => "receipt from another run of the log",
         Undetermined::UnverifiableReceipt { .. } => "receipt not signed by the operator",
         Undetermined::UnverifiableBlock { .. } => "block hash not reproduced",
         Undetermined::MissingReceipt { .. } => "receipt missing for a pair",
@@ -199,7 +240,7 @@ fn reason(undetermined: &Undetermined) -> &'static str {
 /// Faults are printed. Undetermined checks are counted and stay silent: a
 /// detector that narrates everything it could not judge trains its reader to
 /// ignore it.
-fn report(totals: &mut Totals, context: &str, scan: Scan, operator: &ed25519_dalek::VerifyingKey) {
+fn report(totals: &mut Totals, context: &str, scan: Scan, operator: &Operator) {
     for undetermined in &scan.undetermined {
         *totals.undetermined.entry(reason(undetermined)).or_default() += 1;
     }
@@ -208,7 +249,7 @@ fn report(totals: &mut Totals, context: &str, scan: Scan, operator: &ed25519_dal
         // Re-derived from the evidence before it is shown, so what gets
         // printed is something a third party can reproduce rather than
         // something this process merely asserts.
-        let proof = match fault.verify(operator) {
+        let proof = match fault.verify(&operator.key) {
             Ok(()) => "verified against the operator key".to_owned(),
             Err(error) => format!("EVIDENCE DID NOT VERIFY: {error}"),
         };

@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
-use ed25519_dalek::VerifyingKey;
 use mb_receipt::{LEN_HASH, LEN_TX_SIG, Mode, SignedReceipt};
 
-use crate::{observed_transaction::ObservedTransaction, withdrawals::Withdrawals};
+use crate::{
+    observed_transaction::ObservedTransaction, operator::Operator, withdrawals::Withdrawals,
+};
 
 /// Finds the receipt belonging to a transaction, whichever way it was issued.
 ///
@@ -21,12 +22,18 @@ pub struct ReceiptIndex {
 }
 
 impl ReceiptIndex {
-    pub fn build(receipts: &[SignedReceipt], operator: &VerifyingKey) -> Self {
+    pub fn build(receipts: &[SignedReceipt], operator: &Operator) -> Self {
         let mut index = Self {
             withdrawn: Withdrawals::build(receipts, operator),
             ..Self::default()
         };
         for signed in receipts {
+            // A receipt from another run of the log is no cover for a
+            // transaction in this one. Without this an operator could hide an
+            // insertion by receipting it under a log nobody is watching.
+            if operator.accepts(signed).is_err() {
+                continue;
+            }
             match signed.receipt.mode {
                 Mode::Commit => {
                     index.by_hash.insert(signed.receipt.tx_hash, signed.clone());

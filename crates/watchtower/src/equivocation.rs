@@ -1,7 +1,8 @@
-use ed25519_dalek::VerifyingKey;
 use mb_receipt::{GENESIS_PREV_HASH, SignedReceipt};
 
-use crate::{fault::Fault, scan::Scan, undetermined::Undetermined, verdict::Verdict};
+use crate::{
+    fault::Fault, operator::Operator, scan::Scan, undetermined::Undetermined, verdict::Verdict,
+};
 
 /// Examines a stretch of receipt log for contradictions the operator signed.
 ///
@@ -12,18 +13,18 @@ use crate::{fault::Fault, scan::Scan, undetermined::Undetermined, verdict::Verdi
 /// carries meaning, because a log can be tailed and backfilled at once. It may
 /// also contain entries the operator never signed, which is why nothing here
 /// reaches a check before its signature is established.
-pub fn scan_receipts(receipts: &[SignedReceipt], operator: &VerifyingKey) -> Scan {
+pub fn scan_receipts(receipts: &[SignedReceipt], operator: &Operator) -> Scan {
     let mut scan = Scan::default();
 
     let mut ordered: Vec<&SignedReceipt> = receipts.iter().collect();
     ordered.sort_by_key(|signed| signed.receipt.seq);
 
-    // Every later check names the operator in its output, so only entries the
-    // operator provably signed are allowed to reach one. Bytes anybody could
-    // have written are counted and dropped.
+    // Every later check names the operator in its output, so only statements
+    // the operator provably made about this log are allowed to reach one.
+    // Everything else is counted and dropped.
     let mut attributable: Vec<&SignedReceipt> = Vec::new();
     for signed in ordered {
-        let verdict = check_signature(signed, operator);
+        let verdict = check_belongs_here(signed, operator);
         if matches!(verdict, Verdict::Clean) {
             attributable.push(signed);
         }
@@ -57,13 +58,11 @@ pub fn scan_receipts(receipts: &[SignedReceipt], operator: &VerifyingKey) -> Sca
     scan
 }
 
-fn check_signature(signed: &SignedReceipt, operator: &VerifyingKey) -> Verdict {
-    if signed.verify(operator).is_err() {
-        return Verdict::CannotDetermine(Undetermined::UnverifiableReceipt {
-            seq: signed.receipt.seq,
-        });
+fn check_belongs_here(signed: &SignedReceipt, operator: &Operator) -> Verdict {
+    match operator.accepts(signed) {
+        Ok(()) => Verdict::Clean,
+        Err(reason) => Verdict::CannotDetermine(reason.undetermined(signed.receipt.seq)),
     }
-    Verdict::Clean
 }
 
 /// One sequence number may carry only one statement. Repeats of the very same

@@ -26,6 +26,7 @@ fn offset(v: &Value, field: &str) -> usize {
 
 fn receipt_from_case(c: &Value) -> Receipt {
     Receipt {
+        log_id: h32(c["log_id_hex"].as_str().unwrap()),
         mode: Mode::from_u8(c["mode"].as_u64().unwrap() as u8).unwrap(),
         seq: c["seq"].as_u64().unwrap(),
         tx_sig: h64(c["tx_sig_hex"].as_str().unwrap()),
@@ -45,6 +46,7 @@ fn vector_describes_the_layout_this_build_produces() {
     assert_eq!(v["receipt_len"].as_u64().unwrap() as usize, RECEIPT_LEN);
 
     assert_eq!(offset(&v, "domain_tag"), OFF_DOMAIN_TAG);
+    assert_eq!(offset(&v, "log_id"), OFF_LOG_ID);
     assert_eq!(offset(&v, "mode"), OFF_MODE);
     assert_eq!(offset(&v, "seq"), OFF_SEQ);
     assert_eq!(offset(&v, "tx_sig"), OFF_TX_SIG);

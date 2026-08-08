@@ -7,6 +7,10 @@ const OPERATOR_SEED: [u8; 32] = [
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 
+/// Names the run of the log these receipts belong to. A fresh one every time
+/// the sequence counter restarts.
+const LOG_ID: [u8; 32] = [0x9c; 32];
+
 /// Legacy Solana transfer, byte-exact. The signature is a fixed placeholder, not a real
 /// ed25519 signature: nothing in this crate verifies it, and using a real one would make
 /// the fixture depend on solana-sdk.
@@ -38,6 +42,7 @@ fn main() {
     let tx_b = fixture_tx(0x77, 0x66, 0x88, 2_000);
 
     let plain = Receipt {
+        log_id: LOG_ID,
         mode: Mode::Plain,
         seq: 0,
         tx_sig: [0x11; 64],
@@ -52,6 +57,7 @@ fn main() {
     .expect("plain receipt must be valid");
 
     let commit = Receipt {
+        log_id: LOG_ID,
         mode: Mode::Commit,
         seq: 1,
         tx_sig: ZERO_SIG,
@@ -69,6 +75,7 @@ fn main() {
     // `tx_hash` carries that receipt's hash, which appears in this same file
     // as case 0's `receipt_hash_hex`.
     let retract = Receipt {
+        log_id: LOG_ID,
         mode: Mode::Retract,
         seq: 2,
         tx_sig: [0x11; 64],
@@ -86,6 +93,7 @@ fn main() {
         let mut case = json!({
             "name": name,
             "tx_hash_hex": hex::encode(s.receipt.tx_hash),
+            "log_id_hex": hex::encode(s.receipt.log_id),
             "mode": s.receipt.mode as u8,
             "seq": s.receipt.seq,
             "tx_sig_hex": hex::encode(s.receipt.tx_sig),
@@ -114,6 +122,7 @@ fn main() {
         "operator_pubkey_hex": hex::encode(pubkey.to_bytes()),
         "offsets": {
             "domain_tag": OFF_DOMAIN_TAG,
+            "log_id": OFF_LOG_ID,
             "mode": OFF_MODE,
             "seq": OFF_SEQ,
             "tx_sig": OFF_TX_SIG,

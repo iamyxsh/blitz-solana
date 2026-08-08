@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use ed25519_dalek::VerifyingKey;
 use mb_receipt::{LEN_HASH, Mode, SignedReceipt};
+
+use crate::operator::Operator;
 
 /// Which promises the operator has publicly taken back.
 ///
@@ -20,10 +21,10 @@ pub struct Withdrawals {
 }
 
 impl Withdrawals {
-    pub fn build(receipts: &[SignedReceipt], operator: &VerifyingKey) -> Self {
+    pub fn build(receipts: &[SignedReceipt], operator: &Operator) -> Self {
         let mut withdrawals = Self::default();
         for signed in receipts {
-            if signed.receipt.mode != Mode::Retract || signed.verify(operator).is_err() {
+            if signed.receipt.mode != Mode::Retract || operator.accepts(signed).is_err() {
                 continue;
             }
             withdrawals
@@ -53,7 +54,9 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mb_receipt::{Receipt, ZERO_HASH, ZERO_PUBKEY};
 
-    fn operator() -> SigningKey {
+    const LOG_ID: [u8; 32] = [0x9c; 32];
+
+    fn key() -> SigningKey {
         SigningKey::from_bytes(&[0x07; 32])
     }
 
@@ -61,8 +64,13 @@ mod tests {
         SigningKey::from_bytes(&[0x09; 32])
     }
 
+    fn operator() -> Operator {
+        Operator::new(key().verifying_key(), LOG_ID)
+    }
+
     fn promise(seq: u64) -> SignedReceipt {
         Receipt {
+            log_id: LOG_ID,
             mode: Mode::Plain,
             seq,
             tx_sig: [(seq as u8) | 0x80; 64],
@@ -73,12 +81,13 @@ mod tests {
             ingress_slot: 1_000 + seq,
             t_ingress_micros: 1_700_000_000_000_000 + seq,
         }
-        .sign(&operator())
+        .sign(&key())
         .unwrap()
     }
 
     fn withdrawal_of(seq: u64, withdrawn: &SignedReceipt, key: &SigningKey) -> SignedReceipt {
         Receipt {
+            log_id: LOG_ID,
             mode: Mode::Retract,
             seq,
             tx_sig: withdrawn.receipt.tx_sig,
@@ -97,11 +106,11 @@ mod tests {
     fn a_withdrawal_is_found_by_the_receipt_it_names() {
         let taken_back = promise(0);
         let standing = promise(1);
-        let withdrawal = withdrawal_of(2, &taken_back, &operator());
+        let withdrawal = withdrawal_of(2, &taken_back, &key());
 
         let withdrawals = Withdrawals::build(
             &[taken_back.clone(), standing.clone(), withdrawal.clone()],
-            &operator().verifying_key(),
+            &operator(),
         );
 
         assert_eq!(withdrawals.len(), 1);
@@ -117,8 +126,25 @@ mod tests {
         let standing = promise(0);
         let forged = withdrawal_of(2, &standing, &stranger());
 
-        let withdrawals =
-            Withdrawals::build(&[standing.clone(), forged], &operator().verifying_key());
+        let withdrawals = Withdrawals::build(&[standing.clone(), forged], &operator());
+
+        assert!(withdrawals.is_empty());
+        assert_eq!(withdrawals.of(&standing), None);
+    }
+
+    /// A withdrawal issued in an earlier run of the log takes nothing back in
+    /// this one, even though the operator genuinely signed it.
+    #[test]
+    fn a_withdrawal_from_another_log_is_not_indexed() {
+        let standing = promise(0);
+        let elsewhere = Receipt {
+            log_id: [0x01; 32],
+            ..withdrawal_of(2, &standing, &key()).receipt
+        }
+        .sign(&key())
+        .unwrap();
+
+        let withdrawals = Withdrawals::build(&[standing.clone(), elsewhere], &operator());
 
         assert!(withdrawals.is_empty());
         assert_eq!(withdrawals.of(&standing), None);
@@ -126,10 +152,7 @@ mod tests {
 
     #[test]
     fn ordinary_receipts_withdraw_nothing() {
-        let withdrawals = Withdrawals::build(
-            &[promise(0), promise(1), promise(2)],
-            &operator().verifying_key(),
-        );
+        let withdrawals = Withdrawals::build(&[promise(0), promise(1), promise(2)], &operator());
 
         assert!(withdrawals.is_empty());
     }

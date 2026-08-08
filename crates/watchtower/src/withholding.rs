@@ -1,9 +1,8 @@
-use ed25519_dalek::VerifyingKey;
 use mb_receipt::{Mode, SignedReceipt};
 
 use crate::{
-    blockhash_slots::BlockhashSlots, execution::ExecutionIndex, fault::Fault, scan::Scan,
-    undetermined::Undetermined, verdict::Verdict, withdrawals::Withdrawals,
+    blockhash_slots::BlockhashSlots, execution::ExecutionIndex, fault::Fault, operator::Operator,
+    scan::Scan, undetermined::Undetermined, verdict::Verdict, withdrawals::Withdrawals,
 };
 
 /// How patient the detector is before it calls delay misbehaviour.
@@ -62,15 +61,15 @@ pub fn scan_withholding(
     blockhashes: &BlockhashSlots,
     head: u64,
     patience: &Patience,
-    operator: &VerifyingKey,
+    operator: &Operator,
 ) -> Scan {
     let mut scan = Scan::default();
     let withdrawn = Withdrawals::build(receipts, operator);
 
     for receipt in receipts {
-        if receipt.verify(operator).is_err() {
-            // Naming the forgery belongs to the receipt-log scan; refusing to
-            // reason from it belongs here.
+        if operator.accepts(receipt).is_err() {
+            // Naming what a stray entry is belongs to the receipt-log scan;
+            // refusing to reason from it belongs here.
             continue;
         }
         // A withdrawal is a statement about a transaction, never one that runs

@@ -1,7 +1,8 @@
 use ed25519_dalek::SigningKey;
 use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_HASH, ZERO_PUBKEY};
 use mb_watchtower::{
-    BlockhashSlots, Execution, ExecutionIndex, Fault, Patience, Undetermined, scan_withholding,
+    BlockhashSlots, Execution, ExecutionIndex, Fault, Operator, Patience, Undetermined,
+    scan_withholding,
 };
 
 const BLOCKHASH: [u8; 32] = [0x33; 32];
@@ -11,8 +12,16 @@ fn operator() -> SigningKey {
     SigningKey::from_bytes(&[0x07; 32])
 }
 
+const LOG_ID: [u8; 32] = [0x9c; 32];
+
+/// The node this watchtower follows: whose key, and which run of its log.
+fn watched() -> Operator {
+    Operator::new(operator().verifying_key(), LOG_ID)
+}
+
 fn receipt(seq: u64, ingress_slot: u64) -> SignedReceipt {
     Receipt {
+        log_id: LOG_ID,
         mode: Mode::Plain,
         seq,
         tx_sig: [(seq as u8) | 0x80; 64],
@@ -50,12 +59,13 @@ fn scan(receipts: &[SignedReceipt], executed: &ExecutionIndex, head: u64) -> mb_
         &blockhashes(),
         head,
         &Patience::default(),
-        &operator().verifying_key(),
+        &watched(),
     )
 }
 
 fn retraction(seq: u64, withdrawn: &SignedReceipt) -> SignedReceipt {
     Receipt {
+        log_id: LOG_ID,
         mode: Mode::Retract,
         seq,
         tx_sig: withdrawn.receipt.tx_sig,
@@ -173,7 +183,7 @@ fn a_forgotten_blockhash_is_undetermined_rather_than_a_fault() {
         &BlockhashSlots::default(), // empty: hash never recorded
         BLOCKHASH_SLOT + 10,
         &Patience::default(),
-        &operator().verifying_key(),
+        &watched(),
     );
 
     assert!(scan.faults.is_empty(), "{:?}", scan.faults);
@@ -258,7 +268,7 @@ fn withholding_evidence_verifies_standalone() {
     let scan = scan(&[receipt], &executed, BLOCKHASH_SLOT + 600);
 
     for fault in &scan.faults {
-        assert_eq!(fault.verify(&operator().verifying_key()), Ok(()));
+        assert_eq!(fault.verify(&watched().key), Ok(()));
     }
 }
 
@@ -275,7 +285,7 @@ fn an_overstated_delay_does_not_verify() {
     };
     *held = 9_999;
 
-    assert!(scan.faults[0].verify(&operator().verifying_key()).is_err());
+    assert!(scan.faults[0].verify(&watched().key).is_err());
 }
 
 #[test]
@@ -324,6 +334,7 @@ fn recording_the_same_blockhash_twice_does_not_grow_the_ring() {
 /// missing. It is matched by the contents it committed to instead.
 fn commit_ticket(seq: u64, ingress_slot: u64, contents: &[u8]) -> SignedReceipt {
     Receipt {
+        log_id: LOG_ID,
         mode: mb_receipt::Mode::Commit,
         seq,
         tx_sig: mb_receipt::ZERO_SIG,
@@ -379,7 +390,7 @@ fn a_commitment_whose_contents_never_arrive_is_not_revealed() {
     };
     assert_eq!(receipt.receipt.committer, [0x21; 32]);
     assert_eq!(*waited, 5_000);
-    assert_eq!(scan.faults[0].verify(&operator().verifying_key()), Ok(()));
+    assert_eq!(scan.faults[0].verify(&watched().key), Ok(()));
 }
 
 /// Still inside its deadline, so nothing is claimed either way.
@@ -418,7 +429,7 @@ fn a_commit_ticket_is_not_judged_against_a_blockhash_it_never_named() {
         &BlockhashSlots::default(),
         BLOCKHASH_SLOT + 10,
         &Patience::default(),
-        &operator().verifying_key(),
+        &watched(),
     );
 
     assert!(scan.is_clean(), "{scan:?}");

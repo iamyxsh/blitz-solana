@@ -125,7 +125,7 @@ mod tests {
         let signed = fixtures::plain().sign(&fixtures::operator_key()).unwrap();
         let bytes = signed.to_bytes();
 
-        assert_eq!(bytes.len(), 293);
+        assert_eq!(bytes.len(), 325);
         assert_eq!(&bytes[..RECEIPT_LEN], &signed.message());
         assert_eq!(&bytes[RECEIPT_LEN..], &signed.signature);
         assert_eq!(SignedReceipt::from_bytes(&bytes).unwrap(), signed);

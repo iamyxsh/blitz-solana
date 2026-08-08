@@ -7,8 +7,11 @@ pub fn operator_key() -> SigningKey {
     SigningKey::from_bytes(&[0x07; 32])
 }
 
+pub const LOG_ID: [u8; 32] = [0x9c; 32];
+
 pub fn plain() -> Receipt {
     Receipt {
+        log_id: LOG_ID,
         mode: Mode::Plain,
         seq: 0,
         tx_sig: [0xa1; 64],

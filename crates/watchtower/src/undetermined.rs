@@ -15,6 +15,10 @@ pub enum Undetermined {
     /// and only the operator can sign them, so such an entry is attributable
     /// to nobody: it is set aside rather than held against the operator.
     UnverifiableReceipt { seq: u64 },
+    /// An entry belonging to a different run of the log. Sequence numbers
+    /// restart whenever the node does, so an earlier run's entries occupy the
+    /// same positions as this one's without contradicting them.
+    ForeignLog { seq: u64 },
     /// Neither reading of the block reproduces its hash, so its execution
     /// order cannot be established at all.
     UnverifiableBlock { slot: u64 },

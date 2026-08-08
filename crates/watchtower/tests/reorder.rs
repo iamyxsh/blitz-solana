@@ -1,8 +1,8 @@
 use ed25519_dalek::SigningKey;
 use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_HASH, ZERO_PUBKEY, tx_hash};
 use mb_watchtower::{
-    Fault, ObservedBlock, ObservedTransaction, Order, ReceiptIndex, Undetermined, order::fold,
-    scan_block,
+    Fault, ObservedBlock, ObservedTransaction, Operator, Order, ReceiptIndex, Undetermined,
+    order::fold, scan_block,
 };
 
 const IDENTITY: [u8; 32] = [0xEE; 32];
@@ -13,6 +13,13 @@ const PREVIOUS: [u8; 32] = [0x11; 32];
 
 fn operator() -> SigningKey {
     SigningKey::from_bytes(&[0x07; 32])
+}
+
+const LOG_ID: [u8; 32] = [0x9c; 32];
+
+/// The node this watchtower follows: whose key, and which run of its log.
+fn watched() -> Operator {
+    Operator::new(operator().verifying_key(), LOG_ID)
 }
 
 /// A client transaction writing `writable` and reading `readonly`.
@@ -49,6 +56,7 @@ fn block(executed: &[&ObservedTransaction], reported: Vec<ObservedTransaction>) 
 /// A receipt at `seq` committing to `txn`'s bytes.
 fn receipt_for(seq: u64, txn: &ObservedTransaction) -> SignedReceipt {
     Receipt {
+        log_id: LOG_ID,
         mode: Mode::Plain,
         seq,
         tx_sig: txn.signature,
@@ -66,6 +74,7 @@ fn receipt_for(seq: u64, txn: &ObservedTransaction) -> SignedReceipt {
 /// A retraction at `seq` taking back `withdrawn`, signed by `key`.
 fn withdrawal_of(seq: u64, withdrawn: &SignedReceipt, key: &SigningKey) -> SignedReceipt {
     Receipt {
+        log_id: LOG_ID,
         mode: Mode::Retract,
         seq,
         tx_sig: withdrawn.receipt.tx_sig,
@@ -85,7 +94,7 @@ fn log(entries: &[(u64, &ObservedTransaction)]) -> ReceiptIndex {
         .iter()
         .map(|(seq, txn)| receipt_for(*seq, txn))
         .collect();
-    ReceiptIndex::build(&receipts, &operator().verifying_key())
+    ReceiptIndex::build(&receipts, &watched())
 }
 
 fn log_with(entries: &[(u64, &ObservedTransaction)], extra: &[SignedReceipt]) -> ReceiptIndex {
@@ -94,11 +103,11 @@ fn log_with(entries: &[(u64, &ObservedTransaction)], extra: &[SignedReceipt]) ->
         .map(|(seq, txn)| receipt_for(*seq, txn))
         .collect();
     receipts.extend(extra.iter().cloned());
-    ReceiptIndex::build(&receipts, &operator().verifying_key())
+    ReceiptIndex::build(&receipts, &watched())
 }
 
 fn scan(block: &ObservedBlock, receipts: &ReceiptIndex) -> mb_watchtower::Scan {
-    scan_block(block, receipts, &operator().verifying_key(), &IDENTITY)
+    scan_block(block, receipts, &watched(), &IDENTITY)
 }
 
 // --- Order derivation ---
@@ -218,6 +227,29 @@ fn a_forged_withdrawal_cannot_convict_an_honest_execution() {
     assert!(scan.is_clean(), "{scan:?}");
 }
 
+/// Issuing a receipt under a log nobody follows hides nothing. The transaction
+/// still holds a position in the block, and the log being watched has nothing
+/// covering it — which is exactly what the unticketed rule already reports.
+#[test]
+fn forking_the_log_does_not_hide_a_transaction() {
+    let (a, b) = (txn(1, &[ACCOUNT_A], &[]), txn(2, &[ACCOUNT_A], &[]));
+    let block = block(&[&a, &b], vec![a.clone(), b.clone()]);
+    let elsewhere = Receipt {
+        log_id: [0x01; 32],
+        ..receipt_for(1, &b).receipt
+    }
+    .sign(&operator())
+    .unwrap();
+
+    let scan = scan(
+        &block,
+        &log_with(&[(0, &a)], std::slice::from_ref(&elsewhere)),
+    );
+
+    assert_eq!(scan.faults.len(), 1, "{:?}", scan.faults);
+    assert!(matches!(scan.faults[0], Fault::Unticketed { index: 1, .. }));
+}
+
 // --- Detection ---
 
 /// The teeth on the withdrawal rule. Without this a retraction is a signed,
@@ -261,7 +293,7 @@ fn withdrawn_but_executed_evidence_verifies_standalone() {
     let scan = scan(&block, &log_with(&[(0, &a)], &[withdrawal]));
 
     assert_eq!(scan.faults.len(), 1, "{:?}", scan.faults);
-    assert_eq!(scan.faults[0].verify(&operator().verifying_key()), Ok(()));
+    assert_eq!(scan.faults[0].verify(&watched().key), Ok(()));
     assert!(
         scan.faults[0]
             .verify(&SigningKey::from_bytes(&[0x09; 32]).verifying_key())
@@ -363,11 +395,7 @@ fn reorder_evidence_verifies_standalone() {
     let scan = scan(&block, &log(&[(0, &a), (1, &b)]));
 
     for fault in &scan.faults {
-        assert_eq!(
-            fault.verify(&operator().verifying_key()),
-            Ok(()),
-            "{fault:?}"
-        );
+        assert_eq!(fault.verify(&watched().key), Ok(()), "{fault:?}");
     }
 }
 
@@ -384,7 +412,7 @@ fn reorder_evidence_rejects_transaction_bytes_the_receipt_does_not_bind() {
     };
     jumped.wire_bytes = vec![0xDE; 96];
 
-    assert!(scan.faults[0].verify(&operator().verifying_key()).is_err());
+    assert!(scan.faults[0].verify(&watched().key).is_err());
 }
 
 /// Likewise if the claimed execution order does not reproduce the block hash.
@@ -399,5 +427,5 @@ fn reorder_evidence_rejects_a_doctored_execution_order() {
     };
     executed.reverse();
 
-    assert!(scan.faults[0].verify(&operator().verifying_key()).is_err());
+    assert!(scan.faults[0].verify(&watched().key).is_err());
 }

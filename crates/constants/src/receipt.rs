@@ -1,4 +1,5 @@
 pub const LEN_DOMAIN_TAG: usize = 12;
+pub const LEN_LOG_ID: usize = 32;
 pub const LEN_MODE: usize = 1;
 pub const LEN_SEQ: usize = 8;
 pub const LEN_TX_SIG: usize = 64;
@@ -10,7 +11,8 @@ pub const LEN_MICROS: usize = 8;
 pub const DOMAIN_TAG: &[u8; LEN_DOMAIN_TAG] = b"MBRECEIPT_V1";
 
 pub const OFF_DOMAIN_TAG: usize = 0;
-pub const OFF_MODE: usize = OFF_DOMAIN_TAG + LEN_DOMAIN_TAG;
+pub const OFF_LOG_ID: usize = OFF_DOMAIN_TAG + LEN_DOMAIN_TAG;
+pub const OFF_MODE: usize = OFF_LOG_ID + LEN_LOG_ID;
 pub const OFF_SEQ: usize = OFF_MODE + LEN_MODE;
 pub const OFF_TX_SIG: usize = OFF_SEQ + LEN_SEQ;
 pub const OFF_TX_HASH: usize = OFF_TX_SIG + LEN_TX_SIG;
@@ -31,15 +33,16 @@ pub const ZERO_PUBKEY: [u8; LEN_PUBKEY] = [0u8; LEN_PUBKEY];
 pub const ZERO_HASH: [u8; LEN_HASH] = [0u8; LEN_HASH];
 pub const GENESIS_PREV_HASH: [u8; LEN_HASH] = ZERO_HASH;
 
-const _: () = assert!(RECEIPT_LEN == 229);
-const _: () = assert!(SIGNED_RECEIPT_LEN == 293);
+const _: () = assert!(RECEIPT_LEN == 261);
+const _: () = assert!(SIGNED_RECEIPT_LEN == 325);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const FIELDS: [(usize, usize); 10] = [
+    const FIELDS: [(usize, usize); 11] = [
         (OFF_DOMAIN_TAG, LEN_DOMAIN_TAG),
+        (OFF_LOG_ID, LEN_LOG_ID),
         (OFF_MODE, LEN_MODE),
         (OFF_SEQ, LEN_SEQ),
         (OFF_TX_SIG, LEN_TX_SIG),
@@ -55,13 +58,13 @@ mod tests {
     fn offsets_match_the_frozen_spec() {
         assert_eq!(
             FIELDS.map(|(off, _)| off),
-            [0, 12, 13, 21, 85, 117, 149, 181, 213, 221]
+            [0, 12, 44, 45, 53, 117, 149, 181, 213, 245, 253]
         );
     }
 
     #[test]
     fn total_length_is_frozen() {
-        assert_eq!(RECEIPT_LEN, 229);
+        assert_eq!(RECEIPT_LEN, 261);
         assert_eq!(DOMAIN_TAG, b"MBRECEIPT_V1");
     }
 
