@@ -1,5 +1,5 @@
 use ed25519_dalek::SigningKey;
-use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_PUBKEY};
+use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_HASH, ZERO_PUBKEY};
 use mb_watchtower::{
     BlockhashSlots, Execution, ExecutionIndex, Fault, Patience, Undetermined, scan_withholding,
 };
@@ -54,7 +54,73 @@ fn scan(receipts: &[SignedReceipt], executed: &ExecutionIndex, head: u64) -> mb_
     )
 }
 
+fn retraction(seq: u64, withdrawn: &SignedReceipt) -> SignedReceipt {
+    Receipt {
+        mode: Mode::Retract,
+        seq,
+        tx_sig: withdrawn.receipt.tx_sig,
+        tx_hash: withdrawn.receipt_hash(),
+        recent_blockhash: ZERO_HASH,
+        ..receipt(seq, withdrawn.receipt.ingress_slot).receipt
+    }
+    .sign(&operator())
+    .unwrap()
+}
+
 // --- False-positive guards ---
+
+/// A withdrawal is a statement, not a transaction: nothing about it ever
+/// reaches a block. Judged as if it were one it names no usable block hash and
+/// never executes, so it would report itself as both impossible and withheld.
+#[test]
+fn a_retraction_is_never_expected_to_execute() {
+    let withdrawn = receipt(0, BLOCKHASH_SLOT);
+    let retraction = retraction(1, &withdrawn);
+
+    let scan = scan(
+        &[retraction],
+        &ExecutionIndex::default(),
+        BLOCKHASH_SLOT + Patience::default().absent_slots * 4,
+    );
+
+    assert!(scan.is_clean(), "{scan:?}");
+    assert_eq!(scan.examined(), 0);
+}
+
+/// The reason retraction exists. A forward the node refused leaves a receipt
+/// for a transaction that will never run; without the withdrawal excusing it,
+/// every such rejection convicts an honest operator after `absent_slots`.
+#[test]
+fn a_withdrawn_receipt_that_never_executes_is_clean() {
+    let promise = receipt(0, BLOCKHASH_SLOT);
+    let withdrawal = retraction(1, &promise);
+
+    let scan = scan(
+        &[promise, withdrawal],
+        &ExecutionIndex::default(),
+        BLOCKHASH_SLOT + Patience::default().absent_slots * 4,
+    );
+
+    assert!(scan.is_clean(), "{scan:?}");
+}
+
+/// A withdrawal retires the promise, not the statement. This receipt claims it
+/// arrived before the block hash it names existed — a lie at the moment it was
+/// signed, and taking the position back afterwards does not unsay it.
+#[test]
+fn an_impossible_ingress_claim_survives_its_own_withdrawal() {
+    let promise = receipt(0, BLOCKHASH_SLOT - 1);
+    let withdrawal = retraction(1, &promise);
+
+    let scan = scan(
+        &[promise, withdrawal],
+        &ExecutionIndex::default(),
+        BLOCKHASH_SLOT + 10,
+    );
+
+    assert_eq!(scan.faults.len(), 1, "{:?}", scan.faults);
+    assert!(matches!(scan.faults[0], Fault::ImpossibleIngress { .. }));
+}
 
 #[test]
 fn a_transaction_that_ran_promptly_is_clean() {

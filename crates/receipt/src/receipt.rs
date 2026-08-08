@@ -82,6 +82,22 @@ impl Receipt {
                     return Err(ReceiptError::CommitterZeroed);
                 }
             }
+            // `tx_hash` holds the withdrawn receipt's hash here, not a
+            // transaction hash: the mode byte is what tells the two apart.
+            Mode::Retract => {
+                if self.tx_sig == ZERO_SIG {
+                    return Err(ReceiptError::TxSigZeroed);
+                }
+                if self.tx_hash == ZERO_HASH {
+                    return Err(ReceiptError::TxHashZeroed);
+                }
+                if self.recent_blockhash != ZERO_HASH {
+                    return Err(ReceiptError::RecentBlockhashNotZeroed);
+                }
+                if self.committer != ZERO_PUBKEY {
+                    return Err(ReceiptError::CommitterNotZeroed);
+                }
+            }
             Mode::Reveal => return Err(ReceiptError::ModeReserved),
         }
         Ok(())
@@ -100,7 +116,7 @@ impl Receipt {
 mod tests {
     use super::*;
     use crate::fixtures;
-    use mb_constants::mode::{MODE_COMMIT, MODE_PLAIN};
+    use mb_constants::mode::{MODE_COMMIT, MODE_PLAIN, MODE_RETRACT};
 
     #[test]
     fn every_field_lands_at_its_documented_offset() {
@@ -161,9 +177,26 @@ mod tests {
         assert_eq!(&bytes[OFF_COMMITTER..OFF_INGRESS_SLOT], &[0xe5; 32]);
     }
 
+    /// A retraction names two things: the transaction being withdrawn, so a
+    /// verifier knows what to search blocks for, and the receipt that promised
+    /// it, so the withdrawal is bound to one signed statement rather than to a
+    /// position in general.
+    #[test]
+    fn retract_mode_names_a_transaction_and_the_receipt_it_withdraws() {
+        let bytes = fixtures::retract().to_bytes();
+        assert_eq!(bytes[OFF_MODE], MODE_RETRACT);
+        assert_ne!(&bytes[OFF_TX_SIG..OFF_TX_HASH], &ZERO_SIG);
+        assert_eq!(&bytes[OFF_TX_HASH..OFF_RECENT_BLOCKHASH], &[0xf6; 32]);
+        assert_eq!(
+            &bytes[OFF_RECENT_BLOCKHASH..OFF_PREV_RECEIPT_HASH],
+            &ZERO_HASH
+        );
+        assert_eq!(&bytes[OFF_COMMITTER..OFF_INGRESS_SLOT], &ZERO_PUBKEY);
+    }
+
     #[test]
     fn round_trips_through_bytes() {
-        for receipt in [fixtures::plain(), fixtures::commit()] {
+        for receipt in [fixtures::plain(), fixtures::commit(), fixtures::retract()] {
             assert_eq!(Receipt::from_bytes(&receipt.to_bytes()).unwrap(), receipt);
         }
     }
@@ -218,6 +251,45 @@ mod tests {
     }
 
     #[test]
+    fn retract_mode_rejects_a_zeroed_tx_sig() {
+        let receipt = Receipt {
+            tx_sig: ZERO_SIG,
+            ..fixtures::retract()
+        };
+        assert_rejected_everywhere(&receipt, ReceiptError::TxSigZeroed);
+    }
+
+    /// Without a bound receipt hash a retraction voids a position in general
+    /// rather than one statement in particular, which is an excuse nobody can
+    /// check rather than a withdrawal anybody can.
+    #[test]
+    fn retract_mode_rejects_a_zeroed_tx_hash() {
+        let receipt = Receipt {
+            tx_hash: ZERO_HASH,
+            ..fixtures::retract()
+        };
+        assert_rejected_everywhere(&receipt, ReceiptError::TxHashZeroed);
+    }
+
+    #[test]
+    fn retract_mode_rejects_a_recent_blockhash() {
+        let receipt = Receipt {
+            recent_blockhash: [0xc3; 32],
+            ..fixtures::retract()
+        };
+        assert_rejected_everywhere(&receipt, ReceiptError::RecentBlockhashNotZeroed);
+    }
+
+    #[test]
+    fn retract_mode_rejects_a_committer() {
+        let receipt = Receipt {
+            committer: [0x55; 32],
+            ..fixtures::retract()
+        };
+        assert_rejected_everywhere(&receipt, ReceiptError::CommitterNotZeroed);
+    }
+
+    #[test]
     fn reveal_mode_is_reserved() {
         let receipt = Receipt {
             mode: Mode::Reveal,
@@ -229,7 +301,7 @@ mod tests {
     #[test]
     fn rejects_unknown_mode_bytes() {
         let mut bytes = fixtures::plain().to_bytes();
-        for byte in [0x00, 0x04, 0xff] {
+        for byte in [0x00, 0x05, 0xff] {
             bytes[OFF_MODE] = byte;
             assert_eq!(
                 Receipt::from_bytes(&bytes).unwrap_err(),

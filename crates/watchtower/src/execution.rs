@@ -32,7 +32,10 @@ impl ExecutionIndex {
     pub fn find(&self, receipt: &SignedReceipt) -> Option<Execution> {
         match receipt.receipt.mode {
             Mode::Commit => self.by_hash.get(&receipt.receipt.tx_hash).copied(),
-            _ => self.by_signature.get(&receipt.receipt.tx_sig).copied(),
+            // A withdrawal names the transaction it withdraws, so this asks
+            // whether that transaction ran in spite of being withdrawn.
+            Mode::Plain | Mode::Retract => self.by_signature.get(&receipt.receipt.tx_sig).copied(),
+            Mode::Reveal => None,
         }
     }
 

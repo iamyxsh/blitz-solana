@@ -1,5 +1,5 @@
 use ed25519_dalek::SigningKey;
-use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_PUBKEY};
+use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_HASH, ZERO_PUBKEY};
 use mb_watchtower::{Fault, Undetermined, equivocation::scan_receipts};
 
 fn operator() -> SigningKey {
@@ -109,6 +109,34 @@ fn a_log_that_starts_above_zero_is_undetermined_at_its_origin() {
     );
 }
 
+/// A withdrawal takes its own position rather than the one it voids, so the
+/// log still holds exactly one statement per sequence number and every link
+/// still points at the entry before it. Without this the operator's own
+/// documented way of undoing a position reads as a contradiction.
+#[test]
+fn a_log_containing_a_retraction_is_clean() {
+    let key = operator();
+    let mut log = honest_log(3);
+    let retraction = Receipt {
+        mode: Mode::Retract,
+        seq: 3,
+        tx_sig: log[1].receipt.tx_sig,
+        tx_hash: log[1].receipt_hash(),
+        recent_blockhash: ZERO_HASH,
+        prev_receipt_hash: log[2].receipt_hash(),
+        committer: ZERO_PUBKEY,
+        ingress_slot: 1_003,
+        t_ingress_micros: 1_700_000_000_000_003,
+    }
+    .sign(&key)
+    .unwrap();
+    log.push(retraction);
+
+    let scan = scan_receipts(&log, &key.verifying_key());
+
+    assert!(scan.is_clean(), "{scan:?}");
+}
+
 #[test]
 fn an_honest_log_is_clean() {
     let scan = scan_receipts(&honest_log(16), &operator().verifying_key());
@@ -201,17 +229,50 @@ fn rewriting_the_final_entry_breaks_only_its_own_link() {
     assert_eq!(broken, vec![3], "{:?}", scan.faults);
 }
 
+/// Replacing an entry with one the operator never signed removes it from the
+/// evidence rather than convicting anyone with it. What is left is a hole,
+/// which is exactly what a hole should look like.
 #[test]
-fn a_receipt_signed_by_a_stranger_does_not_verify() {
+fn a_receipt_signed_by_a_stranger_is_set_aside() {
     let mut log = honest_log(3);
     log[1] = log[1].receipt.clone().sign(&stranger()).unwrap();
 
     let scan = scan_receipts(&log, &operator().verifying_key());
 
-    assert!(
-        scan.faults
-            .iter()
-            .any(|fault| matches!(fault, Fault::Unverifiable { seq: 1, .. }))
+    assert!(scan.faults.is_empty(), "{:?}", scan.faults);
+    assert_eq!(
+        scan.undetermined,
+        vec![
+            Undetermined::UnverifiableReceipt { seq: 1 },
+            Undetermined::SequenceGap {
+                after: 0,
+                before: 2
+            },
+        ]
+    );
+}
+
+/// A stranger holding no key must not be able to make this detector accuse
+/// anybody. Appending junk at a sequence the honest log already occupies is
+/// the cheapest attempt available, and it costs nothing to try.
+#[test]
+fn a_forged_receipt_cannot_manufacture_an_equivocation() {
+    let mut log = honest_log(3);
+    log.push(
+        Receipt {
+            tx_sig: [0xAB; 64],
+            ..receipt(1, log[0].receipt_hash())
+        }
+        .sign(&stranger())
+        .unwrap(),
+    );
+
+    let scan = scan_receipts(&log, &operator().verifying_key());
+
+    assert!(scan.faults.is_empty(), "{:?}", scan.faults);
+    assert_eq!(
+        scan.undetermined,
+        vec![Undetermined::UnverifiableReceipt { seq: 1 }]
     );
 }
 

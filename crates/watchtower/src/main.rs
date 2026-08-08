@@ -79,7 +79,7 @@ fn watch(
 
     loop {
         let receipts = client.receipts(0, RECEIPT_PAGE)?;
-        let index = ReceiptIndex::build(&receipts);
+        let index = ReceiptIndex::build(&receipts, &operator);
 
         // Scanned together: a contradiction between the published log and a
         // receipt the node handed a client is exactly two signed statements
@@ -186,8 +186,10 @@ fn reason(undetermined: &Undetermined) -> &'static str {
     match undetermined {
         Undetermined::SequenceGap { .. } => "sequence gap",
         Undetermined::MissingOrigin { .. } => "log does not start at zero",
+        Undetermined::UnverifiableReceipt { .. } => "receipt not signed by the operator",
         Undetermined::UnverifiableBlock { .. } => "block hash not reproduced",
         Undetermined::MissingReceipt { .. } => "receipt missing for a pair",
+        Undetermined::WithdrawnReceipt { .. } => "receipt withdrawn for a pair",
         Undetermined::OperatorIssuedPair { .. } => "operator-issued pair",
         Undetermined::UnknownBlockhash { .. } => "blockhash outside the window",
         Undetermined::NotYetExecuted { .. } => "not yet executed",
@@ -240,9 +242,21 @@ fn describe(fault: &Fault) -> String {
              \n  The log does not begin from a genesis link.",
             receipt.receipt.seq
         ),
-        Fault::Unverifiable { seq, .. } => format!(
-            "  unverifiable receipt at seq {seq}\n\
-             \n  This receipt is not signed by the node's identity."
+        Fault::WithdrawnButExecuted {
+            receipt,
+            withdrawal,
+            execution,
+            ..
+        } => format!(
+            "  withdrawn transaction executed in slot {} at index {}\n    {}\n\
+             \x20   promised at seq {}, withdrawn at seq {}\n\
+             \n  The operator signed a statement that this transaction would\n\
+             \x20 not run, and then ran it.",
+            execution.slot,
+            execution.index,
+            sig(&receipt.receipt.tx_sig),
+            receipt.receipt.seq,
+            withdrawal.receipt.seq,
         ),
         Fault::Unticketed {
             slot,

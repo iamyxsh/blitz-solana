@@ -1,7 +1,7 @@
 use ed25519_dalek::VerifyingKey;
 
 use crate::{
-    conflict::conflicts, fault::Fault, observed_block::ObservedBlock,
+    conflict::conflicts, execution::Execution, fault::Fault, observed_block::ObservedBlock,
     observed_transaction::ObservedTransaction, receipt_index::ReceiptIndex,
     reordered_transaction::ReorderedTransaction, scan::Scan, undetermined::Undetermined,
     verdict::Verdict,
@@ -28,7 +28,13 @@ pub fn scan_block(
     };
 
     for (index, txn) in executed.iter().enumerate() {
-        scan.record(check_ticketed(block, index as u32, txn, receipts));
+        scan.record(check_ticket_is_live(
+            block,
+            index as u32,
+            txn,
+            &executed,
+            receipts,
+        ));
     }
 
     for (earlier, first) in executed.iter().enumerate() {
@@ -47,20 +53,41 @@ pub fn scan_block(
     scan
 }
 
-fn check_ticketed(
+/// A position in a block must be backed by a receipt that is still standing.
+///
+/// A receipt the operator has withdrawn is not a weaker ticket than a missing
+/// one, it is a stronger accusation: the operator signed a statement that this
+/// transaction would not run, and then ran it.
+fn check_ticket_is_live(
     block: &ObservedBlock,
     index: u32,
     txn: &ObservedTransaction,
+    executed: &[&ObservedTransaction],
     receipts: &ReceiptIndex,
 ) -> Verdict {
-    if receipts.find(txn).is_some() {
+    let Some(receipt) = receipts.find(txn) else {
+        return Verdict::Fault(Box::new(Fault::Unticketed {
+            slot: block.slot,
+            index,
+            signature: txn.signature,
+            wire_bytes: txn.wire_bytes.clone(),
+        }));
+    };
+
+    let Some(withdrawal) = receipts.withdrawal(receipt) else {
         return Verdict::Clean;
-    }
-    Verdict::Fault(Box::new(Fault::Unticketed {
-        slot: block.slot,
-        index,
-        signature: txn.signature,
-        wire_bytes: txn.wire_bytes.clone(),
+    };
+
+    Verdict::Fault(Box::new(Fault::WithdrawnButExecuted {
+        receipt: receipt.clone(),
+        withdrawal: withdrawal.clone(),
+        execution: Execution {
+            slot: block.slot,
+            index,
+        },
+        previous_blockhash: block.previous_blockhash,
+        blockhash: block.blockhash,
+        executed: executed.iter().map(|txn| txn.signature).collect(),
     }))
 }
 
@@ -92,6 +119,14 @@ fn check_pair(
     // is this one's.
     if first_receipt.verify(operator).is_err() || second_receipt.verify(operator).is_err() {
         return Verdict::CannotDetermine(Undetermined::MissingReceipt { slot: block.slot });
+    }
+
+    // A withdrawn receipt is a statement the operator has disowned, so it is
+    // no basis for an ordering accusation either. Running the transaction at
+    // all is already reported, and by a fault that does not rest on it.
+    if receipts.withdrawal(first_receipt).is_some() || receipts.withdrawal(second_receipt).is_some()
+    {
+        return Verdict::CannotDetermine(Undetermined::WithdrawnReceipt { slot: block.slot });
     }
 
     if first_receipt.receipt.seq < second_receipt.receipt.seq {

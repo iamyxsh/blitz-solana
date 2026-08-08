@@ -1,7 +1,7 @@
 use crate::receipt::Receipt;
 use ed25519_dalek::SigningKey;
 use mb_constants::mode::Mode;
-use mb_constants::receipt::{GENESIS_PREV_HASH, ZERO_PUBKEY, ZERO_SIG};
+use mb_constants::receipt::{GENESIS_PREV_HASH, ZERO_HASH, ZERO_PUBKEY, ZERO_SIG};
 
 pub fn operator_key() -> SigningKey {
     SigningKey::from_bytes(&[0x07; 32])
@@ -27,6 +27,16 @@ pub fn commit() -> Receipt {
         seq: 1,
         tx_sig: ZERO_SIG,
         committer: [0xe5; 32],
+        ..plain()
+    }
+}
+
+pub fn retract() -> Receipt {
+    Receipt {
+        mode: Mode::Retract,
+        seq: 2,
+        tx_hash: [0xf6; 32],
+        recent_blockhash: ZERO_HASH,
         ..plain()
     }
 }

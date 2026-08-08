@@ -3,7 +3,7 @@ use mb_receipt::{Mode, SignedReceipt};
 
 use crate::{
     blockhash_slots::BlockhashSlots, execution::ExecutionIndex, fault::Fault, scan::Scan,
-    undetermined::Undetermined, verdict::Verdict,
+    undetermined::Undetermined, verdict::Verdict, withdrawals::Withdrawals,
 };
 
 /// How patient the detector is before it calls delay misbehaviour.
@@ -65,6 +65,7 @@ pub fn scan_withholding(
     operator: &VerifyingKey,
 ) -> Scan {
     let mut scan = Scan::default();
+    let withdrawn = Withdrawals::build(receipts, operator);
 
     for receipt in receipts {
         if receipt.verify(operator).is_err() {
@@ -72,7 +73,20 @@ pub fn scan_withholding(
             // reason from it belongs here.
             continue;
         }
+        // A withdrawal is a statement about a transaction, never one that runs
+        // itself. Asking where it executed would report every honest
+        // withdrawal as something the operator sat on.
+        if receipt.receipt.mode == Mode::Retract {
+            continue;
+        }
+        // A withdrawal retires the promise, not the statement. Whether the
+        // transaction ever ran stops being this scan's question, but a receipt
+        // whose own fields contradict each other said something false when it
+        // was signed and taking the position back does not unsay it.
         scan.record(check_ingress_is_possible(receipt, blockhashes, patience));
+        if withdrawn.of(receipt).is_some() {
+            continue;
+        }
         scan.record(check_delivery(receipt, executed, head, patience));
     }
 

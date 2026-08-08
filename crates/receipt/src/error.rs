@@ -12,9 +12,13 @@ pub enum ReceiptError {
     ModeReserved,
     #[error("tx_sig must be zero in COMMIT mode")]
     TxSigNotZeroed,
-    #[error("tx_sig must be non-zero in PLAIN mode")]
+    #[error("tx_sig must name a transaction in PLAIN and RETRACT modes")]
     TxSigZeroed,
-    #[error("committer must be zero in PLAIN mode")]
+    #[error("tx_hash must name the receipt being withdrawn in RETRACT mode")]
+    TxHashZeroed,
+    #[error("recent_blockhash must be zero in RETRACT mode")]
+    RecentBlockhashNotZeroed,
+    #[error("committer must be zero outside COMMIT mode")]
     CommitterNotZeroed,
     #[error("committer must be non-zero in COMMIT mode")]
     CommitterZeroed,

@@ -1,5 +1,5 @@
 use ed25519_dalek::VerifyingKey;
-use mb_receipt::{GENESIS_PREV_HASH, SignedReceipt};
+use mb_receipt::{GENESIS_PREV_HASH, Mode, SignedReceipt};
 
 use crate::{execution::Execution, order::fold, reordered_transaction::ReorderedTransaction};
 
@@ -27,8 +27,6 @@ pub enum Fault {
     },
     /// The first receipt of the log does not start the chain from zero.
     BadOrigin { receipt: SignedReceipt },
-    /// A receipt that does not verify under the operator's key.
-    Unverifiable { seq: u64, receipt: SignedReceipt },
     /// A transaction holding a position in a block with no receipt behind it.
     /// On a validator where every producer stamps, this is an injection.
     Unticketed {
@@ -43,6 +41,20 @@ pub enum Fault {
         receipt: SignedReceipt,
         execution: Execution,
         held: u64,
+    },
+    /// A transaction the operator publicly took back and then ran anyway.
+    ///
+    /// Unlike the two absence claims below, this one is provable from the
+    /// object alone: it names two signed statements and a position in a block
+    /// whose hash re-derives from the order carried with it.
+    WithdrawnButExecuted {
+        receipt: SignedReceipt,
+        withdrawal: SignedReceipt,
+        execution: Execution,
+        previous_blockhash: [u8; 32],
+        blockhash: [u8; 32],
+        /// Execution order, recheckable against the two hashes above.
+        executed: Vec<[u8; 64]>,
     },
     /// A transaction the operator receipted and then never ran.
     ///
@@ -100,8 +112,12 @@ pub enum FaultError {
     ChainIntact,
     #[error("the origin is correct")]
     OriginIntact,
-    #[error("the receipt verifies, so it is not a forgery")]
-    ReceiptVerifies,
+    #[error("the receipt offered as a withdrawal is not in RETRACT mode")]
+    NotAWithdrawal,
+    #[error("the withdrawal names a different receipt")]
+    WithdrawalNamesAnotherReceipt,
+    #[error("the withdrawal is sequenced before the receipt it claims to take back")]
+    WithdrawalPrecedesReceipt,
     #[error("the transaction bytes do not hash to the receipt's tx_hash")]
     ReceiptDoesNotBindTransaction,
     #[error("the signature list does not reproduce the block hash")]
@@ -119,14 +135,13 @@ pub enum FaultError {
 impl Fault {
     pub fn seq(&self) -> u64 {
         match self {
-            Fault::Equivocation { seq, .. }
-            | Fault::BrokenChain { seq, .. }
-            | Fault::Unverifiable { seq, .. } => *seq,
+            Fault::Equivocation { seq, .. } | Fault::BrokenChain { seq, .. } => *seq,
             Fault::BadOrigin { receipt } => receipt.receipt.seq,
             Fault::Unticketed { .. } => u64::MAX,
             Fault::Withheld { receipt, .. }
             | Fault::Absent { receipt, .. }
             | Fault::NotRevealed { receipt, .. }
+            | Fault::WithdrawnButExecuted { receipt, .. }
             | Fault::ImpossibleIngress { receipt, .. } => receipt.receipt.seq,
             Fault::Reorder { jumped, .. } => jumped.receipt.receipt.seq,
         }
@@ -179,18 +194,6 @@ impl Fault {
                 }
                 Ok(())
             }
-            Fault::Unverifiable { seq, receipt } => {
-                if receipt.verify(operator).is_ok() {
-                    return Err(FaultError::ReceiptVerifies);
-                }
-                if receipt.receipt.seq != *seq {
-                    return Err(FaultError::NotAdjacent {
-                        a: receipt.receipt.seq,
-                        b: *seq,
-                    });
-                }
-                Ok(())
-            }
             Fault::Withheld {
                 receipt,
                 execution,
@@ -202,6 +205,39 @@ impl Fault {
                 {
                     return Err(FaultError::DeliveredInTime);
                 }
+                Ok(())
+            }
+            Fault::WithdrawnButExecuted {
+                receipt,
+                withdrawal,
+                execution,
+                previous_blockhash,
+                blockhash,
+                executed,
+            } => {
+                signed(receipt, operator)?;
+                signed(withdrawal, operator)?;
+
+                if withdrawal.receipt.mode != Mode::Retract {
+                    return Err(FaultError::NotAWithdrawal);
+                }
+                if withdrawal.receipt.tx_hash != receipt.receipt_hash() {
+                    return Err(FaultError::WithdrawalNamesAnotherReceipt);
+                }
+                // The hash chain already makes a backdated withdrawal
+                // impossible to construct; checking it here means a verifier
+                // does not have to reason about the chain to know that.
+                if withdrawal.receipt.seq <= receipt.receipt.seq {
+                    return Err(FaultError::WithdrawalPrecedesReceipt);
+                }
+
+                if fold(previous_blockhash, executed.iter()) != *blockhash {
+                    return Err(FaultError::OrderNotReproduced);
+                }
+                executed
+                    .get(execution.index as usize)
+                    .filter(|signature| **signature == receipt.receipt.tx_sig)
+                    .ok_or(FaultError::NotAtClaimedIndex)?;
                 Ok(())
             }
             Fault::Absent { receipt, .. } | Fault::NotRevealed { receipt, .. } => {

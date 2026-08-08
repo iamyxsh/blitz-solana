@@ -11,11 +11,19 @@ pub enum Undetermined {
     SequenceGap { after: u64, before: u64 },
     /// The log does not begin at sequence zero, so its origin is unverified.
     MissingOrigin { lowest: u64 },
+    /// An entry carrying no valid operator signature. Anyone can write bytes
+    /// and only the operator can sign them, so such an entry is attributable
+    /// to nobody: it is set aside rather than held against the operator.
+    UnverifiableReceipt { seq: u64 },
     /// Neither reading of the block reproduces its hash, so its execution
     /// order cannot be established at all.
     UnverifiableBlock { slot: u64 },
     /// A conflicting pair where at least one side has no receipt to compare.
     MissingReceipt { slot: u64 },
+    /// A conflicting pair where at least one receipt has been withdrawn. The
+    /// execution is reported on its own; ordering is not judged against a
+    /// statement the operator has taken back.
+    WithdrawnReceipt { slot: u64 },
     /// The block hash a receipt names is outside the window the watchtower
     /// still remembers, so no timing claim about it can be checked.
     UnknownBlockhash { seq: u64 },

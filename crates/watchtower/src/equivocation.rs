@@ -9,29 +9,39 @@ use crate::{fault::Fault, scan::Scan, undetermined::Undetermined, verdict::Verdi
 /// transactions, no live node. Everything it can find is provable cold.
 ///
 /// The input may arrive in any order and may contain duplicates; neither
-/// carries meaning, because a log can be tailed and backfilled at once.
+/// carries meaning, because a log can be tailed and backfilled at once. It may
+/// also contain entries the operator never signed, which is why nothing here
+/// reaches a check before its signature is established.
 pub fn scan_receipts(receipts: &[SignedReceipt], operator: &VerifyingKey) -> Scan {
     let mut scan = Scan::default();
 
     let mut ordered: Vec<&SignedReceipt> = receipts.iter().collect();
     ordered.sort_by_key(|signed| signed.receipt.seq);
 
-    for signed in &ordered {
-        scan.record(check_signature(signed, operator));
+    // Every later check names the operator in its output, so only entries the
+    // operator provably signed are allowed to reach one. Bytes anybody could
+    // have written are counted and dropped.
+    let mut attributable: Vec<&SignedReceipt> = Vec::new();
+    for signed in ordered {
+        let verdict = check_signature(signed, operator);
+        if matches!(verdict, Verdict::Clean) {
+            attributable.push(signed);
+        }
+        scan.record(verdict);
     }
 
     // Collapse byte-identical re-deliveries, then look for genuine
     // contradictions among what remains at each sequence number.
     let mut position = 0;
     let mut distinct: Vec<&SignedReceipt> = Vec::new();
-    while position < ordered.len() {
-        let seq = ordered[position].receipt.seq;
-        let end = ordered[position..]
+    while position < attributable.len() {
+        let seq = attributable[position].receipt.seq;
+        let end = attributable[position..]
             .iter()
             .position(|signed| signed.receipt.seq != seq)
-            .map_or(ordered.len(), |offset| position + offset);
+            .map_or(attributable.len(), |offset| position + offset);
 
-        let group = &ordered[position..end];
+        let group = &attributable[position..end];
         scan.record(check_one_statement_per_sequence(seq, group));
         distinct.push(group[0]);
         position = end;
@@ -49,10 +59,9 @@ pub fn scan_receipts(receipts: &[SignedReceipt], operator: &VerifyingKey) -> Sca
 
 fn check_signature(signed: &SignedReceipt, operator: &VerifyingKey) -> Verdict {
     if signed.verify(operator).is_err() {
-        return Verdict::Fault(Box::new(Fault::Unverifiable {
+        return Verdict::CannotDetermine(Undetermined::UnverifiableReceipt {
             seq: signed.receipt.seq,
-            receipt: (*signed).clone(),
-        }));
+        });
     }
     Verdict::Clean
 }

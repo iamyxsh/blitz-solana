@@ -28,7 +28,8 @@ pub const SIGNED_RECEIPT_LEN: usize = OFF_SIGNATURE + LEN_SIGNATURE;
 
 pub const ZERO_SIG: [u8; LEN_TX_SIG] = [0u8; LEN_TX_SIG];
 pub const ZERO_PUBKEY: [u8; LEN_PUBKEY] = [0u8; LEN_PUBKEY];
-pub const GENESIS_PREV_HASH: [u8; LEN_HASH] = [0u8; LEN_HASH];
+pub const ZERO_HASH: [u8; LEN_HASH] = [0u8; LEN_HASH];
+pub const GENESIS_PREV_HASH: [u8; LEN_HASH] = ZERO_HASH;
 
 const _: () = assert!(RECEIPT_LEN == 229);
 const _: () = assert!(SIGNED_RECEIPT_LEN == 293);

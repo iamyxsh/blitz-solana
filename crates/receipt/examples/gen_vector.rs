@@ -65,11 +65,26 @@ fn main() {
     .sign(&key)
     .expect("commit receipt must be valid");
 
-    let case = |name: &str, tx: &[u8], s: &SignedReceipt| {
-        json!({
+    // Withdraws the plain receipt above: `tx_sig` names the transaction and
+    // `tx_hash` carries that receipt's hash, which appears in this same file
+    // as case 0's `receipt_hash_hex`.
+    let retract = Receipt {
+        mode: Mode::Retract,
+        seq: 2,
+        tx_sig: [0x11; 64],
+        tx_hash: plain.receipt_hash(),
+        recent_blockhash: ZERO_HASH,
+        prev_receipt_hash: commit.receipt_hash(),
+        committer: ZERO_PUBKEY,
+        ingress_slot: 6_150_404,
+        t_ingress_micros: 1_754_300_123_556_789,
+    }
+    .sign(&key)
+    .expect("retract receipt must be valid");
+
+    let case = |name: &str, tx: Option<&[u8]>, s: &SignedReceipt| {
+        let mut case = json!({
             "name": name,
-            "wire_bytes_hex": hex::encode(tx),
-            "wire_bytes_base58": bs58::encode(tx).into_string(),
             "tx_hash_hex": hex::encode(s.receipt.tx_hash),
             "mode": s.receipt.mode as u8,
             "seq": s.receipt.seq,
@@ -82,7 +97,14 @@ fn main() {
             "message_hex": hex::encode(s.message()),
             "signature_hex": hex::encode(s.signature),
             "receipt_hash_hex": hex::encode(s.receipt_hash()),
-        })
+        });
+        // A retraction binds a receipt hash rather than transaction bytes, so
+        // it carries no wire bytes to reproduce.
+        if let Some(tx) = tx {
+            case["wire_bytes_hex"] = json!(hex::encode(tx));
+            case["wire_bytes_base58"] = json!(bs58::encode(tx).into_string());
+        }
+        case
     };
 
     let vector = json!({
@@ -103,8 +125,9 @@ fn main() {
             "t_ingress_micros": OFF_T_INGRESS_MICROS,
         },
         "cases": [
-            case("plain_genesis", &tx_a, &plain),
-            case("commit_chained", &tx_b, &commit),
+            case("plain_genesis", Some(&tx_a), &plain),
+            case("commit_chained", Some(&tx_b), &commit),
+            case("retract_of_plain_genesis", None, &retract),
         ],
     });
 

@@ -13,6 +13,7 @@ pub mod reordered_transaction;
 pub mod scan;
 pub mod undetermined;
 pub mod verdict;
+pub mod withdrawals;
 pub mod withholding;
 
 pub mod equivocation;
@@ -30,4 +31,5 @@ pub use reordered_transaction::ReorderedTransaction;
 pub use scan::Scan;
 pub use undetermined::Undetermined;
 pub use verdict::Verdict;
+pub use withdrawals::Withdrawals;
 pub use withholding::{Patience, scan_withholding};

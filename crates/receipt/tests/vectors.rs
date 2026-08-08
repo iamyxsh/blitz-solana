@@ -89,7 +89,18 @@ fn reproduces_the_frozen_vector() {
 
 #[test]
 fn tx_hash_covers_raw_wire_bytes_not_the_encoded_string() {
-    for c in vector()["cases"].as_array().unwrap() {
+    let v = vector();
+    // A retraction's tx_hash is a receipt hash, so it has no wire bytes to
+    // reproduce and is checked by the test below instead.
+    let cases: Vec<&Value> = v["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["wire_bytes_hex"].is_string())
+        .collect();
+    assert_eq!(cases.len(), 2);
+
+    for c in cases {
         let raw = hex::decode(c["wire_bytes_hex"].as_str().unwrap()).unwrap();
         let base58 = c["wire_bytes_base58"].as_str().unwrap();
         let expected = h32(c["tx_hash_hex"].as_str().unwrap());
@@ -98,6 +109,22 @@ fn tx_hash_covers_raw_wire_bytes_not_the_encoded_string() {
         assert_ne!(tx_hash(base58.as_bytes()), expected);
         assert_ne!(tx_hash(hex::encode(&raw).as_bytes()), expected);
     }
+}
+
+/// The one place `tx_hash` means something other than "hash of a transaction".
+/// A reimplementation that misses this reproduces every byte of the layout and
+/// still binds retractions to nothing.
+#[test]
+fn the_retraction_names_the_receipt_it_withdraws() {
+    let v = vector();
+    let key = operator_key(&v);
+    let plain = receipt_from_case(&v["cases"][0]).sign(&key).unwrap();
+    let retraction = receipt_from_case(&v["cases"][2]);
+
+    assert_eq!(retraction.mode, Mode::Retract);
+    assert_eq!(retraction.tx_hash, plain.receipt_hash());
+    assert_eq!(retraction.tx_sig, plain.receipt.tx_sig);
+    assert_eq!(retraction.recent_blockhash, ZERO_HASH);
 }
 
 #[test]

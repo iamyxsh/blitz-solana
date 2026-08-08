@@ -1,5 +1,5 @@
 use ed25519_dalek::SigningKey;
-use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_PUBKEY, tx_hash};
+use mb_receipt::{Mode, Receipt, SignedReceipt, ZERO_HASH, ZERO_PUBKEY, tx_hash};
 use mb_watchtower::{
     Fault, ObservedBlock, ObservedTransaction, Order, ReceiptIndex, Undetermined, order::fold,
     scan_block,
@@ -63,12 +63,38 @@ fn receipt_for(seq: u64, txn: &ObservedTransaction) -> SignedReceipt {
     .unwrap()
 }
 
+/// A retraction at `seq` taking back `withdrawn`, signed by `key`.
+fn withdrawal_of(seq: u64, withdrawn: &SignedReceipt, key: &SigningKey) -> SignedReceipt {
+    Receipt {
+        mode: Mode::Retract,
+        seq,
+        tx_sig: withdrawn.receipt.tx_sig,
+        tx_hash: withdrawn.receipt_hash(),
+        recent_blockhash: ZERO_HASH,
+        prev_receipt_hash: [0x44; 32],
+        committer: ZERO_PUBKEY,
+        ingress_slot: SLOT,
+        t_ingress_micros: 1_700_000_000_000_000 + seq,
+    }
+    .sign(key)
+    .unwrap()
+}
+
 fn log(entries: &[(u64, &ObservedTransaction)]) -> ReceiptIndex {
     let receipts: Vec<SignedReceipt> = entries
         .iter()
         .map(|(seq, txn)| receipt_for(*seq, txn))
         .collect();
-    ReceiptIndex::build(&receipts)
+    ReceiptIndex::build(&receipts, &operator().verifying_key())
+}
+
+fn log_with(entries: &[(u64, &ObservedTransaction)], extra: &[SignedReceipt]) -> ReceiptIndex {
+    let mut receipts: Vec<SignedReceipt> = entries
+        .iter()
+        .map(|(seq, txn)| receipt_for(*seq, txn))
+        .collect();
+    receipts.extend(extra.iter().cloned());
+    ReceiptIndex::build(&receipts, &operator().verifying_key())
 }
 
 fn scan(block: &ObservedBlock, receipts: &ReceiptIndex) -> mb_watchtower::Scan {
@@ -177,7 +203,98 @@ fn an_empty_block_is_clean() {
     assert!(scan(&block, &ReceiptIndex::default()).is_clean());
 }
 
+/// Anyone can append bytes to a public log. If those bytes could withdraw a
+/// receipt, every transaction the operator honestly executed would become
+/// evidence against it — and the block half of that evidence would check out,
+/// because the transaction really did run.
+#[test]
+fn a_forged_withdrawal_cannot_convict_an_honest_execution() {
+    let (a, b) = (txn(1, &[ACCOUNT_A], &[]), txn(2, &[ACCOUNT_A], &[]));
+    let block = block(&[&a, &b], vec![a.clone(), b.clone()]);
+    let forged = withdrawal_of(9, &receipt_for(0, &a), &SigningKey::from_bytes(&[0x09; 32]));
+
+    let scan = scan(&block, &log_with(&[(0, &a), (1, &b)], &[forged]));
+
+    assert!(scan.is_clean(), "{scan:?}");
+}
+
 // --- Detection ---
+
+/// The teeth on the withdrawal rule. Without this a retraction is a signed,
+/// documented way to run anything in any order: take the position back, then
+/// execute regardless.
+#[test]
+fn a_withdrawn_transaction_that_executes_anyway_is_a_fault() {
+    let (a, b) = (txn(1, &[ACCOUNT_A], &[]), txn(2, &[ACCOUNT_B], &[]));
+    let block = block(&[&a, &b], vec![a.clone(), b.clone()]);
+    let withdrawal = withdrawal_of(9, &receipt_for(0, &a), &operator());
+
+    let scan = scan(
+        &block,
+        &log_with(&[(0, &a), (1, &b)], std::slice::from_ref(&withdrawal)),
+    );
+
+    assert_eq!(scan.faults.len(), 1, "{:?}", scan.faults);
+    let Fault::WithdrawnButExecuted {
+        receipt,
+        withdrawal: named,
+        execution,
+        ..
+    } = &scan.faults[0]
+    else {
+        panic!("expected a withdrawn execution, got {:?}", scan.faults[0]);
+    };
+    assert_eq!(receipt.receipt.tx_sig, a.signature);
+    assert_eq!(*named, withdrawal);
+    assert_eq!(execution.slot, SLOT);
+    assert_eq!(execution.index, 0);
+}
+
+/// The whole point of the object: someone holding it and the operator's public
+/// key reaches the same conclusion, with no node to ask.
+#[test]
+fn withdrawn_but_executed_evidence_verifies_standalone() {
+    let a = txn(1, &[ACCOUNT_A], &[]);
+    let block = block(&[&a], vec![a.clone()]);
+    let withdrawal = withdrawal_of(9, &receipt_for(0, &a), &operator());
+
+    let scan = scan(&block, &log_with(&[(0, &a)], &[withdrawal]));
+
+    assert_eq!(scan.faults.len(), 1, "{:?}", scan.faults);
+    assert_eq!(scan.faults[0].verify(&operator().verifying_key()), Ok(()));
+    assert!(
+        scan.faults[0]
+            .verify(&SigningKey::from_bytes(&[0x09; 32]).verifying_key())
+            .is_err()
+    );
+}
+
+/// One act, one accusation. Ordering is not judged against a statement the
+/// operator has publicly disowned — running the transaction at all is already
+/// reported, by a fault that does not rest on the withdrawn receipt.
+#[test]
+fn a_withdrawn_receipt_is_not_used_to_build_a_reorder() {
+    let (a, b) = (txn(1, &[ACCOUNT_A], &[]), txn(2, &[ACCOUNT_A], &[]));
+    // b arrived second (seq 1) but executed first: a reorder, but for the
+    // withdrawal of b's receipt.
+    let block = block(&[&b, &a], vec![b.clone(), a.clone()]);
+    let withdrawal = withdrawal_of(9, &receipt_for(1, &b), &operator());
+
+    let scan = scan(&block, &log_with(&[(0, &a), (1, &b)], &[withdrawal]));
+
+    assert!(
+        !scan
+            .faults
+            .iter()
+            .any(|fault| matches!(fault, Fault::Reorder { .. })),
+        "{:?}",
+        scan.faults
+    );
+    assert_eq!(
+        scan.undetermined,
+        vec![Undetermined::WithdrawnReceipt { slot: SLOT }]
+    );
+}
 
 #[test]
 fn a_swapped_pair_of_conflicting_transactions_is_a_reorder() {
