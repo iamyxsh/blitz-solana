@@ -10,6 +10,9 @@ name = "mb_watchtower"
 path = "src/lib.rs"
 
 [dependencies]
+mb-court = { workspace = true }
+solana-client = { workspace = true }
+solana-sdk = { workspace = true }
 base64 = { workspace = true }
 bincode = { workspace = true }
 blake3 = { workspace = true }

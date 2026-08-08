@@ -1,0 +1,22 @@
+[package]
+name = "mb-court"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mb-demo"
+path = "src/main.rs"
+
+[dependencies]
+mb-constants = { workspace = true }
+mb-receipt = { workspace = true }
+mb-slashing = { workspace = true }
+mb-slashing-program = { workspace = true }
+ed25519-dalek = { workspace = true }
+solana-client = { workspace = true }
+solana-sdk = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+bs58 = { workspace = true }

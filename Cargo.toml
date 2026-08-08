@@ -12,6 +12,8 @@ license = "MIT OR Apache-2.0"
 mb-constants = { path = "crates/constants" }
 mb-receipt = { path = "crates/receipt" }
 mb-slashing = { path = "crates/slashing" }
+mb-slashing-program = { path = "crates/program", default-features = false, features = ["no-entrypoint"] }
+mb-court = { path = "crates/court" }
 
 base64 = "0.22"
 bincode = "1.3"
@@ -32,3 +34,5 @@ solana-system-transaction = "3.0"
 solana-transaction = { version = "3.0", features = ["serde", "bincode"] }
 ureq = { version = "2.10", features = ["json"] }
 bs58 = "0.5"
+solana-client = "2.1"
+solana-sdk = "2.1"

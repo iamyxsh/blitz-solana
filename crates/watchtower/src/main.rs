@@ -6,6 +6,8 @@
 
 use std::{collections::HashMap, thread::sleep, time::Duration};
 
+mod court;
+
 use mb_watchtower::{
     BlockhashSlots, Execution, ExecutionIndex, Fault, Operator, Order, Patience, ReceiptIndex,
     Scan, Undetermined, client::Client, scan_block, scan_receipts, scan_withholding,
@@ -31,8 +33,9 @@ fn main() {
         .position(|arg| arg == "--log-id")
         .and_then(|at| args.get(at + 1))
         .map(|value| decode_log_id(value));
+    let court = court::Court::from_args(&args);
 
-    if let Err(error) = watch(&url, once, client_receipts.as_deref(), log_id) {
+    if let Err(error) = watch(&url, once, client_receipts.as_deref(), log_id, court) {
         eprintln!("watchtower stopped: {error}");
         std::process::exit(1);
     }
@@ -71,6 +74,7 @@ fn watch(
     once: bool,
     client_receipts: Option<&str>,
     log_id: Option<[u8; 32]>,
+    court: Option<court::Court>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new(url);
     let key = client.operator()?;
@@ -131,6 +135,7 @@ fn watch(
             "receipt log",
             scan_receipts(&combined, &operator),
             &operator,
+            court.as_ref(),
         );
 
         let head = client.slot()?;
@@ -162,7 +167,13 @@ fn watch(
                         .or_default() += 1;
                 }
                 let scan = scan_block(&block, &index, &operator, &identity);
-                report(&mut totals, &format!("slot {next_slot}"), scan, &operator);
+                report(
+                    &mut totals,
+                    &format!("slot {next_slot}"),
+                    scan,
+                    &operator,
+                    court.as_ref(),
+                );
             }
             next_slot += 1;
         }
@@ -179,6 +190,7 @@ fn watch(
                 &operator,
             ),
             &operator,
+            court.as_ref(),
         );
 
         println!(
@@ -240,7 +252,13 @@ fn reason(undetermined: &Undetermined) -> &'static str {
 /// Faults are printed. Undetermined checks are counted and stay silent: a
 /// detector that narrates everything it could not judge trains its reader to
 /// ignore it.
-fn report(totals: &mut Totals, context: &str, scan: Scan, operator: &Operator) {
+fn report(
+    totals: &mut Totals,
+    context: &str,
+    scan: Scan,
+    operator: &Operator,
+    court: Option<&court::Court>,
+) {
     for undetermined in &scan.undetermined {
         *totals.undetermined.entry(reason(undetermined)).or_default() += 1;
     }
@@ -254,6 +272,13 @@ fn report(totals: &mut Totals, context: &str, scan: Scan, operator: &Operator) {
             Err(error) => format!("EVIDENCE DID NOT VERIFY: {error}"),
         };
         println!("\nFAULT in {context}\n{}\n\n  [{proof}]", describe(fault));
+
+        // Only evidence that re-derived is worth a transaction: submitting a
+        // fault this process could not verify itself would put an accusation
+        // on chain that the program is about to reject anyway.
+        if let (Some(court), Ok(())) = (court, fault.verify(&operator.key)) {
+            court.convict(fault, operator);
+        }
     }
 }
 
