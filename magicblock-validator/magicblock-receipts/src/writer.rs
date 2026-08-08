@@ -1,5 +1,8 @@
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -33,6 +36,7 @@ pub(crate) struct ReceiptWriter {
     ledger: Arc<Ledger>,
     key: SigningKey,
     slots: SlotSource,
+    log_id: [u8; LEN_HASH],
     seq: u64,
     prev_receipt_hash: [u8; LEN_HASH],
     equivocation: Equivocation,
@@ -55,6 +59,7 @@ impl ReceiptWriter {
             inbox,
             events,
             ledger,
+            log_id: mint_log_id(&key),
             key,
             slots,
             seq: 0,
@@ -137,6 +142,7 @@ impl ReceiptWriter {
 
         let ingress_slot = (self.slots)();
         let ticket = Receipt {
+            log_id: self.log_id,
             mode: Mode::Commit,
             seq: self.seq,
             tx_sig: ZERO_SIG,
@@ -233,6 +239,7 @@ impl ReceiptWriter {
         recent_blockhash: [u8; LEN_HASH],
     ) -> Result<SignedReceipt, StampError> {
         let receipt = Receipt {
+            log_id: self.log_id,
             mode: Mode::Plain,
             seq: self.seq,
             tx_sig,
@@ -277,6 +284,33 @@ impl ReceiptWriter {
         self.published = Some(published);
         Ok(signed)
     }
+}
+
+/// Names this run of the log.
+///
+/// The sequence counter starts again at zero every time a writer is built, so
+/// a fresh identifier is minted at the same moment. Without it the new run's
+/// entries occupy the same positions as the previous run's under the same
+/// signing key, which reads as the operator contradicting itself.
+fn mint_log_id(key: &SigningKey) -> [u8; LEN_HASH] {
+    static MINTED: AtomicU64 = AtomicU64::new(0);
+
+    // The clock separates runs of the process and the counter separates
+    // writers inside one, because two writers can be built inside a single
+    // clock tick and a repeated log id would undo the whole point of having
+    // one.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or_default();
+
+    let mut seed = [0u8; 48];
+    seed[..32].copy_from_slice(key.verifying_key().as_bytes());
+    seed[32..40].copy_from_slice(&nanos.to_le_bytes());
+    seed[40..].copy_from_slice(
+        &MINTED.fetch_add(1, Ordering::Relaxed).to_le_bytes(),
+    );
+    tx_hash(&seed)
 }
 
 fn now_micros() -> u64 {

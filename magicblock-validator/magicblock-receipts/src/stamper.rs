@@ -202,6 +202,22 @@ mod tests {
         receipts
     }
 
+    /// Sequence numbers start again at zero for every writer while the signing
+    /// key stays the same, so what keeps two runs apart is the log id alone.
+    /// One run must use exactly one, and no two runs may share it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn each_run_of_the_log_gets_one_identifier_of_its_own() {
+        let first = stamp_concurrently(4).await;
+        let second = stamp_concurrently(4).await;
+
+        let one_log: Vec<[u8; LEN_HASH]> =
+            first.iter().map(|signed| signed.receipt.log_id).collect();
+        assert!(one_log.windows(2).all(|pair| pair[0] == pair[1]));
+
+        assert_eq!(first[0].receipt.seq, second[0].receipt.seq);
+        assert_ne!(first[0].receipt.log_id, second[0].receipt.log_id);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn seq_is_dense_and_gapless_under_concurrency() {
         const N: u8 = 64;

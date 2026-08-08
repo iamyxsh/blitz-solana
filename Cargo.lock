@@ -655,6 +655,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mb-slashing"
+version = "0.1.0"
+dependencies = [
+ "mb-constants",
+ "thiserror",
+]
+
+[[package]]
 name = "mb-watchtower"
 version = "0.1.0"
 dependencies = [
