@@ -5,7 +5,7 @@ use crate::error::SlashError;
 /// Hand-decoded rather than derived: the discriminants are wire values that
 /// clients in other languages have to reproduce, so they belong somewhere a
 /// reader can see them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     /// Create the operator account and post its bond.
     Register { signing_key: [u8; 32], bond: u64 },
@@ -17,6 +17,8 @@ pub enum Instruction {
     Claim,
     /// Present two contradictory receipts and slash the bond.
     ProveEquivocation,
+    /// Produce the wronged transaction and collect its escrowed share.
+    ClaimVictim { wire_bytes: Vec<u8> },
 }
 
 impl Instruction {
@@ -45,6 +47,9 @@ impl Instruction {
             2 => Ok(Self::Unstake { amount: amount()? }),
             3 => Ok(Self::Claim),
             4 => Ok(Self::ProveEquivocation),
+            5 => Ok(Self::ClaimVictim {
+                wire_bytes: rest.to_vec(),
+            }),
             _ => Err(SlashError::BadInstruction),
         }
     }
@@ -69,6 +74,11 @@ impl Instruction {
             }
             Self::Claim => vec![3],
             Self::ProveEquivocation => vec![4],
+            Self::ClaimVictim { wire_bytes } => {
+                let mut data = vec![5];
+                data.extend_from_slice(wire_bytes);
+                data
+            }
         }
     }
 }
@@ -88,10 +98,13 @@ mod tests {
             Instruction::Unstake { amount: u64::MAX },
             Instruction::Claim,
             Instruction::ProveEquivocation,
+            Instruction::ClaimVictim {
+                wire_bytes: vec![1, 2, 3],
+            },
         ] {
             assert_eq!(
                 Instruction::read(&instruction.write()).unwrap(),
-                instruction
+                instruction.clone()
             );
         }
     }

@@ -35,6 +35,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         Instruction::Unstake { amount } => unstake(program_id, accounts, amount),
         Instruction::Claim => claim(program_id, accounts),
         Instruction::ProveEquivocation => prove_equivocation(program_id, accounts),
+        Instruction::ClaimVictim { wire_bytes } => claim_victim(program_id, accounts, &wire_bytes),
     }
 }
 
@@ -384,6 +385,7 @@ fn prove_equivocation(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
     ConvictionAccount {
         operator: *operator_info.key,
         wronged: evidence.wronged_signature(),
+        wronged_tx_hash: evidence.wronged_tx_hash(),
         slashed,
         owed_to_victim: applied.victim,
         slot: Clock::get()?.slot,
@@ -410,6 +412,37 @@ fn prove_equivocation(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
         applied.pool
     );
     Ok(())
+}
+
+/// Pays the escrowed share to whoever produces the transaction the log lied
+/// to.
+///
+/// Accounts: claimant, conviction.
+fn claim_victim(program_id: &Pubkey, accounts: &[AccountInfo], wire: &[u8]) -> ProgramResult {
+    let info = &mut accounts.iter();
+    let claimant = next_account_info(info)?;
+    let conviction_info = next_account_info(info)?;
+
+    if !claimant.is_signer {
+        return Err(SlashError::NotSigner.into());
+    }
+    owned_by(conviction_info, program_id)?;
+    let mut conviction = ConvictionAccount::read(&conviction_info.try_borrow_data()?)?;
+
+    // The hash is what binds these bytes to the receipt. Matching the
+    // signature alone would not: nothing here verifies it, so anyone could
+    // paste it into a transaction naming themselves as the payer.
+    if solana_program::hash::hashv(&[wire]).to_bytes() != conviction.wronged_tx_hash {
+        return Err(SlashError::MalformedReceipt.into());
+    }
+    if *claimant.key != Pubkey::new_from_array(crate::transaction::fee_payer(wire)?) {
+        return Err(SlashError::NotSigner.into());
+    }
+
+    let owed = conviction.owed_to_victim;
+    conviction.owed_to_victim = 0;
+    conviction.write(&mut conviction_info.try_borrow_mut_data()?)?;
+    pay_out(conviction_info, claimant, owed)
 }
 
 #[cfg(test)]

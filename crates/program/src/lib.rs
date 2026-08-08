@@ -6,6 +6,7 @@ pub mod instruction;
 pub mod operator_account;
 pub mod position_account;
 pub mod processor;
+pub mod transaction;
 
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(entry);

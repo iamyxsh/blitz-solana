@@ -1,4 +1,6 @@
-use mb_constants::receipt::{OFF_LOG_ID, OFF_SEQ, OFF_TX_SIG, RECEIPT_LEN};
+use mb_constants::receipt::{
+    OFF_LOG_ID, OFF_RECENT_BLOCKHASH, OFF_SEQ, OFF_TX_HASH, OFF_TX_SIG, RECEIPT_LEN,
+};
 
 use crate::error::SlashError;
 
@@ -81,6 +83,14 @@ impl<'a> Equivocation<'a> {
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&self.ordered().0[OFF_TX_SIG..OFF_TX_SIG + 64]);
         signature
+    }
+
+    /// What that transaction's wire bytes must hash to, so the escrow can be
+    /// claimed only by producing the transaction itself.
+    pub fn wronged_tx_hash(&self) -> [u8; 32] {
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&self.ordered().0[OFF_TX_HASH..OFF_RECENT_BLOCKHASH]);
+        hash
     }
 }
 
