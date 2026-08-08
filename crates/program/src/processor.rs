@@ -36,6 +36,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         Instruction::Claim => claim(program_id, accounts),
         Instruction::ProveEquivocation => prove_equivocation(program_id, accounts),
         Instruction::ClaimVictim { wire_bytes } => claim_victim(program_id, accounts, &wire_bytes),
+        Instruction::BeginUnbond => begin_unbond(program_id, accounts),
+        Instruction::WithdrawBond => withdraw_bond(program_id, accounts),
     }
 }
 
@@ -412,6 +414,66 @@ fn prove_equivocation(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
         applied.pool
     );
     Ok(())
+}
+
+/// Loads the operator account and checks the caller may act for it.
+fn as_authority(
+    program_id: &Pubkey,
+    authority: &AccountInfo,
+    operator_info: &AccountInfo,
+) -> Result<OperatorAccount, ProgramError> {
+    if !authority.is_signer {
+        return Err(SlashError::NotSigner.into());
+    }
+    owned_by(operator_info, program_id)?;
+    let account = OperatorAccount::read(&operator_info.try_borrow_data()?)?;
+    if account.authority != *authority.key {
+        return Err(SlashError::NotSigner.into());
+    }
+    Ok(account)
+}
+
+/// Starts the clock on getting the bond back.
+///
+/// The bond keeps standing behind the log for the whole delay. Evidence for
+/// anything the operator did before asking still slashes it, which is the
+/// point: otherwise misbehaving and withdrawing in the same breath costs
+/// nothing.
+fn begin_unbond(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let info = &mut accounts.iter();
+    let authority = next_account_info(info)?;
+    let operator_info = next_account_info(info)?;
+
+    let mut account = as_authority(program_id, authority, operator_info)?;
+    if account.bond == 0 {
+        return Err(SlashError::InsufficientBond.into());
+    }
+
+    // Asking again does not restart the clock, so an operator cannot keep a
+    // withdrawal permanently one instruction away.
+    if account.unbond_at == 0 {
+        account.unbond_at = Clock::get()?.slot + mb_constants::slashing::UNBOND_SLOTS;
+        account.write(&mut operator_info.try_borrow_mut_data()?)?;
+    }
+    solana_program::msg!("bond withdrawable at slot {}", account.unbond_at);
+    Ok(())
+}
+
+fn withdraw_bond(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let info = &mut accounts.iter();
+    let authority = next_account_info(info)?;
+    let operator_info = next_account_info(info)?;
+
+    let mut account = as_authority(program_id, authority, operator_info)?;
+    if account.unbond_at == 0 || Clock::get()?.slot < account.unbond_at {
+        return Err(SlashError::BondLocked.into());
+    }
+
+    let bond = account.bond;
+    account.bond = 0;
+    account.unbond_at = 0;
+    account.write(&mut operator_info.try_borrow_mut_data()?)?;
+    pay_out_from_operator(operator_info, &account, authority, bond)
 }
 
 /// Pays the escrowed share to whoever produces the transaction the log lied

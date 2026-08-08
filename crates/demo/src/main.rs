@@ -27,11 +27,31 @@ type Fallible = Result<(), Box<dyn std::error::Error>>;
 
 fn main() -> Fallible {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let flag = |name: &str| {
+        args.iter()
+            .position(|arg| arg == name)
+            .and_then(|at| args.get(at + 1))
+            .cloned()
+    };
     let program = Pubkey::from_str(
         args.first()
+            .filter(|arg| !arg.starts_with("--"))
             .map(String::as_str)
             .unwrap_or("8VMsFLGQEF4x3wrFUfoipjjyzYFNe8DhNGAjXeDTSey7"),
     )?;
+
+    // Receipts the attack rig actually produced, rather than a contradiction
+    // this binary signed for itself. The operator is registered on its behalf,
+    // which is the demo taking a shortcut a real operator would not need.
+    if let (Some(path), Some(signer)) = (flag("--receipts"), flag("--signer")) {
+        let url = flag("--url").unwrap_or_else(|| "https://api.devnet.solana.com".to_owned());
+        return convict_captured(
+            &RpcClient::new_with_commitment(url, CommitmentConfig::confirmed()),
+            program,
+            &path,
+            &Pubkey::from_str(&signer)?,
+        );
+    }
     let url = args
         .get(1)
         .cloned()
@@ -44,11 +64,20 @@ fn main() -> Fallible {
 }
 
 fn run(rpc: &RpcClient, program: Pubkey) -> Fallible {
-    let payer = load_payer()?;
+    let funder = load_payer()?;
     let victim = Keypair::new();
+    // A fresh authority every run, so the whole thing can be filmed twice.
+    let payer = Keypair::new();
     let operator_key = SigningKey::from_bytes(&[0x07; 32]);
     let signing_key = Pubkey::new_from_array(operator_key.verifying_key().to_bytes());
     let addresses = Addresses::new(program, &payer.pubkey());
+
+    fund(
+        rpc,
+        &funder,
+        &payer.pubkey(),
+        BOND + STAKE + LAMPORTS_PER_SOL / 50,
+    )?;
 
     println!("program   {program}");
     println!("authority {}", payer.pubkey());
@@ -98,6 +127,35 @@ fn run(rpc: &RpcClient, program: Pubkey) -> Fallible {
     })?;
 
     report(rpc, &addresses, &payer.pubkey())?;
+
+    // The operator asks for its bond back, then tries to take it. The delay is
+    // what stops misbehaving and withdrawing in the same breath.
+    step("operator asks for its bond back", || {
+        send(
+            rpc,
+            &payer,
+            &[authority_only(
+                program,
+                &payer.pubkey(),
+                &addresses,
+                Slash::BeginUnbond,
+            )],
+        )
+    })?;
+    println!("\noperator tries to withdraw immediately");
+    match send(
+        rpc,
+        &payer,
+        &[authority_only(
+            program,
+            &payer.pubkey(),
+            &addresses,
+            Slash::WithdrawBond,
+        )],
+    ) {
+        Ok(()) => return Err("the bond came out before its timelock ran".into()),
+        Err(_) => println!("  refused: the bond stays slashable until the delay runs"),
+    }
 
     // The fault: one position, two different signed statements about it.
     let (a, b) = contradiction(&operator_key, &wronged);
@@ -163,6 +221,161 @@ fn run(rpc: &RpcClient, program: Pubkey) -> Fallible {
         );
     }
     Ok(())
+}
+
+/// Convicts on a contradiction found in a captured receipt log.
+///
+/// The pair is not chosen here: the watchtower's own scan picks it, so what
+/// reaches the program is exactly what the detector would have submitted.
+fn convict_captured(rpc: &RpcClient, program: Pubkey, path: &str, signer: &Pubkey) -> Fallible {
+    let payer = load_payer()?;
+    let addresses = Addresses::new(program, &payer.pubkey());
+    let receipts = load_receipts(path)?;
+
+    let watched = mb_watchtower::Operator::new(
+        ed25519_dalek::VerifyingKey::from_bytes(&signer.to_bytes())?,
+        receipts
+            .first()
+            .ok_or("no receipts in the capture")?
+            .receipt
+            .log_id,
+    );
+    let scan = mb_watchtower::scan_receipts(&receipts, &watched);
+    let Some(mb_watchtower::Fault::Equivocation { seq, a, b }) = scan
+        .faults
+        .iter()
+        .find(|fault| matches!(fault, mb_watchtower::Fault::Equivocation { .. }))
+    else {
+        return Err(format!(
+            "no equivocation in {path}: {} faults, {} undetermined",
+            scan.faults.len(),
+            scan.undetermined.len()
+        )
+        .into());
+    };
+
+    println!("program   {program}");
+    println!("operator  {}", addresses.operator);
+    println!("signer    {signer}");
+    println!("\ncaptured contradiction at seq {seq}:");
+    println!("  a {}", bs58(&a.receipt_hash()));
+    println!("  b {}", bs58(&b.receipt_hash()));
+
+    step("register the operator and post its bond", || {
+        send(
+            rpc,
+            &payer,
+            &[register(program, &payer.pubkey(), &addresses, signer)],
+        )
+    })?;
+    step("stake coverage against it", || {
+        send(rpc, &payer, &[stake(program, &payer.pubkey(), &addresses)])
+    })?;
+    report(rpc, &addresses, &payer.pubkey())?;
+
+    let conviction = addresses.conviction(&a.message(), &b.message());
+    step("prove the equivocation", || {
+        send(
+            rpc,
+            &payer,
+            &prove_equivocation(&addresses, &payer.pubkey(), signer, a, b),
+        )
+    })?;
+    println!("  conviction {conviction}");
+    report(rpc, &addresses, &payer.pubkey())?;
+
+    if let Some(record) = read::<ConvictionAccount>(rpc, &conviction, ConvictionAccount::read)? {
+        println!(
+            "\nconviction: slashed {} lamports at slot {}, {} owed to the \
+             sender of transaction {}",
+            record.slashed,
+            record.slot,
+            record.owed_to_victim,
+            bs58(&record.wronged)
+        );
+    }
+    Ok(())
+}
+
+fn load_receipts(path: &str) -> Result<Vec<SignedReceipt>, Box<dyn std::error::Error>> {
+    use solana_sdk::bs58 as _;
+    let encoded: Vec<String> = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let mut receipts = Vec::with_capacity(encoded.len());
+    for entry in encoded {
+        let bytes = base64_decode(&entry)?;
+        receipts.push(SignedReceipt::from_bytes(&bytes).map_err(|error| error.to_string())?);
+    }
+    Ok(receipts)
+}
+
+/// Base64 without pulling in another dependency for six lines.
+fn base64_decode(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    for byte in text.bytes().filter(|byte| *byte != b'=') {
+        let value = ALPHABET
+            .iter()
+            .position(|candidate| *candidate == byte)
+            .ok_or("not base64")? as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn register(
+    program: Pubkey,
+    payer: &Pubkey,
+    addresses: &Addresses,
+    signer: &Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: program,
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new(addresses.operator, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: Slash::Register {
+            signing_key: signer.to_bytes(),
+            bond: BOND,
+        }
+        .write(),
+    }
+}
+
+fn authority_only(
+    program: Pubkey,
+    authority: &Pubkey,
+    addresses: &Addresses,
+    data: Slash,
+) -> Instruction {
+    Instruction {
+        program_id: program,
+        accounts: vec![
+            AccountMeta::new(*authority, true),
+            AccountMeta::new(addresses.operator, false),
+        ],
+        data: data.write(),
+    }
+}
+
+fn stake(program: Pubkey, payer: &Pubkey, addresses: &Addresses) -> Instruction {
+    Instruction {
+        program_id: program,
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new(addresses.operator, false),
+            AccountMeta::new(addresses.position(payer), false),
+            AccountMeta::new_readonly(system_program::ID, false),
+        ],
+        data: Slash::Stake { amount: STAKE }.write(),
+    }
 }
 
 /// Two receipts at one sequence number, in one run of the log, differing only

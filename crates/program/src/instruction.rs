@@ -19,6 +19,10 @@ pub enum Instruction {
     ProveEquivocation,
     /// Produce the wronged transaction and collect its escrowed share.
     ClaimVictim { wire_bytes: Vec<u8> },
+    /// Start the timelock on getting the bond back. It stays slashable.
+    BeginUnbond,
+    /// Take the bond back, once the timelock has run.
+    WithdrawBond,
 }
 
 impl Instruction {
@@ -50,6 +54,8 @@ impl Instruction {
             5 => Ok(Self::ClaimVictim {
                 wire_bytes: rest.to_vec(),
             }),
+            6 => Ok(Self::BeginUnbond),
+            7 => Ok(Self::WithdrawBond),
             _ => Err(SlashError::BadInstruction),
         }
     }
@@ -74,6 +80,8 @@ impl Instruction {
             }
             Self::Claim => vec![3],
             Self::ProveEquivocation => vec![4],
+            Self::BeginUnbond => vec![6],
+            Self::WithdrawBond => vec![7],
             Self::ClaimVictim { wire_bytes } => {
                 let mut data = vec![5];
                 data.extend_from_slice(wire_bytes);
@@ -101,6 +109,8 @@ mod tests {
             Instruction::ClaimVictim {
                 wire_bytes: vec![1, 2, 3],
             },
+            Instruction::BeginUnbond,
+            Instruction::WithdrawBond,
         ] {
             assert_eq!(
                 Instruction::read(&instruction.write()).unwrap(),

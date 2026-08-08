@@ -24,3 +24,13 @@ const _: () = assert!(BURN_BPS >= VICTIM_BPS + POOL_BPS);
 /// figure is almost always a fraction. Scaling it keeps the remainder instead
 /// of truncating every distribution to zero.
 pub const REWARD_SCALE: u128 = 1_000_000_000_000;
+
+/// Slots between an operator asking for its bond back and being able to take
+/// it.
+///
+/// Must exceed the widest window in which evidence for an already-committed
+/// fault could still arrive: a watchtower has to observe the log, assemble the
+/// object and land a transaction on the base chain. Otherwise an operator
+/// front-runs its own conviction by withdrawing the moment it misbehaves.
+/// Roughly a day at devnet block times.
+pub const UNBOND_SLOTS: u64 = 216_000;
