@@ -5,3 +5,12 @@ target
 # Dashboard
 app/node_modules
 app/dist
+
+# Rollup state — rocksdb ledger, accountsdb and snapshots, ~28MB per instance
+run/.*
+magicblock-test-storage*
+test-ledger/
+test-ledger-magicblock/
+
+# Receipt dumps written by the send example
+run/*-receipts.json

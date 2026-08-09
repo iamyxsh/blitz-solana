@@ -3,7 +3,7 @@ import { describeEr, type ErInfo } from '../lib/erClient'
 import { short } from '../lib/format'
 
 const KEY = 'mb.er'
-export const readErUrl = () => localStorage.getItem(KEY) ?? 'http://127.0.0.1:8899'
+export const readErUrl = () => localStorage.getItem(KEY) ?? 'http://127.0.0.1:8799'
 
 /** Which rollup this session is talking to, and whether it is answering. */
 export function RollupBar({ onChange }: { onChange: (info: ErInfo | null) => void }) {
@@ -30,7 +30,7 @@ export function RollupBar({ onChange }: { onChange: (info: ErInfo | null) => voi
     <div className={`rollup${info ? ' on' : ''}`}>
       <span className={`led${info ? ' led-on' : error ? ' led-off' : ''}`} />
       <input value={url} onChange={(e) => setUrl(e.target.value)} spellCheck={false}
-        placeholder="http://127.0.0.1:8899" />
+        placeholder="http://127.0.0.1:8799" />
       <button className="btn btn-ghost sm" onClick={() => connect()} disabled={busy}>
         {busy ? '…' : info ? 'reconnect' : 'connect'}
       </button>
