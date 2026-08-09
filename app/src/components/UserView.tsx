@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import bs58 from 'bs58'
 import type { ProgramState } from '../hooks/useProgramState'
 import { useReceiptStore } from '../hooks/useReceiptStore'
+import { usePoll } from '../hooks/usePoll'
 import { fetchLog, type ErInfo } from '../lib/erClient'
 import { scan } from '../lib/evidence'
 import { compareBytes } from '../lib/format'
@@ -14,18 +15,20 @@ import { StakeCard } from './StakeCard'
 import { OwedToYou } from './OwedToYou'
 import { Section } from './Section'
 
+const EMPTY: Receipt[] = []
+
 /** Everything a trader needs, in the order they need it. */
 export function UserView({ state }: { state: ProgramState }) {
   const { publicKey } = useWallet()
   const owner = publicKey?.toBase58() ?? null
   const { kept, add, clear } = useReceiptStore(owner)
   const [rollup, setRollup] = useState<ErInfo | null>(null)
-  const [log, setLog] = useState<Receipt[]>([])
+  const onRollup = useCallback((info: ErInfo | null) => setRollup(info), [])
 
-  useEffect(() => {
-    if (!rollup) return setLog([])
-    fetchLog(rollup.url).then(setLog).catch(() => setLog([]))
-  }, [rollup])
+  // The operator keeps publishing while you watch, so this is re-read rather
+  // than fetched once. A contradiction that appears a second from now should
+  // surface a second from now, not on the next reload.
+  const log = usePoll(() => fetchLog(rollup!.url), 2000, rollup?.url ?? null).value ?? EMPTY
 
   const signingKey = useMemo(() => {
     if (!rollup) return null
@@ -33,7 +36,7 @@ export function UserView({ state }: { state: ProgramState }) {
       const bytes = bs58.decode(rollup.identity)
       return bytes.length === 32 ? bytes : null
     } catch { return null }
-  }, [rollup])
+  }, [rollup?.identity])
 
   // Your copies plus the operator's published log. Neither alone is enough:
   // a node that lies about one position publishes a log that agrees with itself.
@@ -58,7 +61,7 @@ export function UserView({ state }: { state: ProgramState }) {
 
   return (
     <>
-      <RollupBar onChange={setRollup} />
+      <RollupBar onChange={onRollup} />
 
       <Verdict yours={yours.length} others={others.length} watched={kept.length} rollup={!!rollup} />
 

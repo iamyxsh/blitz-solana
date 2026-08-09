@@ -38,6 +38,14 @@ export function useProgramState(): ProgramState {
   const [nonce, setNonce] = useState(0)
   const refresh = useCallback(() => setNonce((n) => n + 1), [])
 
+  // Re-read on a timer as well as on demand. A bond posted or a conviction
+  // landed in another window is still a change to what this one is showing,
+  // and devnet is slow enough that eight seconds is polite.
+  useEffect(() => {
+    const timer = setInterval(refresh, 8000)
+    return () => clearInterval(timer)
+  }, [refresh])
+
   useEffect(() => {
     let live = true
     ;(async () => {
@@ -71,9 +79,9 @@ export function useProgramState(): ProgramState {
           setState({ operators, positions, convictions, mine, balance, slot, loading: false, error: null })
         }
       } catch (error) {
-        if (live) {
-          setState((s) => ({ ...s, loading: false, error: (error as Error).message }))
-        }
+        // Keep whatever was last read: a dropped poll is this browser losing
+        // sight of the chain, not the chain losing the accounts.
+        if (live) setState((s) => ({ ...s, loading: false, error: (error as Error).message }))
       }
     })()
     return () => { live = false }

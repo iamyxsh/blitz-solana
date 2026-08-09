@@ -195,3 +195,12 @@ input:focus,select:focus,textarea:focus{outline:2px solid color-mix(in srgb,var(
 .pair-side b{font-size:14px}
 .pair-vs{display:flex;align-items:center;color:var(--dan);font-weight:700;font-size:13px}
 .ok{color:var(--ok)}
+
+.watching{margin-left:10px;font-size:10px;text-transform:uppercase;letter-spacing:.1em;
+  color:var(--ok);font-weight:700;position:relative;padding-left:13px}
+.watching::before{content:'';position:absolute;left:0;top:50%;width:6px;height:6px;margin-top:-3px;
+  border-radius:50%;background:var(--ok);animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.75)}}
+@media (prefers-reduced-motion: reduce){ .watching::before{animation:none} }
+.stalled{margin-left:10px;font-size:10px;text-transform:uppercase;letter-spacing:.1em;
+  color:var(--dan);font-weight:700}

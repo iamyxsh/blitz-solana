@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useWallet } from '@solana/wallet-adapter-react'
 import bs58 from 'bs58'
 import type { ProgramState } from '../hooks/useProgramState'
 import { fetchLog, type ErInfo } from '../lib/erClient'
+import { usePoll } from '../hooks/usePoll'
 import { EXPLORER } from '../lib/constants'
 import { hex, lamports, short, sol } from '../lib/format'
 import type { Receipt } from '../lib/receipt'
@@ -14,19 +15,21 @@ import { TxButton } from './TxButton'
 import { RollupBar } from './RollupBar'
 import { StakeCard, toLamports } from './StakeCard'
 
+const EMPTY: Receipt[] = []
+
 /** Everything a sequencer needs: its exposure, its log, and the way out. */
 export function ValidatorView({ state }: { state: ProgramState }) {
   const { publicKey } = useWallet()
   const [rollup, setRollup] = useState<ErInfo | null>(null)
-  const [log, setLog] = useState<Receipt[]>([])
+  const onRollup = useCallback((info: ErInfo | null) => setRollup(info), [])
   const [signingKey, setSigningKey] = useState('')
   const [bond, setBond] = useState('0.1')
 
+  const log = usePoll(() => fetchLog(rollup!.url), 2000, rollup?.url ?? null).value ?? EMPTY
+
   useEffect(() => {
-    if (!rollup) return setLog([])
-    setSigningKey((current) => current || rollup.identity)
-    fetchLog(rollup.url).then(setLog).catch(() => setLog([]))
-  }, [rollup])
+    if (rollup) setSigningKey((current) => current || rollup.identity)
+  }, [rollup?.identity])
 
   if (!publicKey) return null
   const mine = state.mine
@@ -36,7 +39,7 @@ export function ValidatorView({ state }: { state: ProgramState }) {
 
   return (
     <>
-      <RollupBar onChange={setRollup} />
+      <RollupBar onChange={onRollup} />
 
       {!mine ? (
         <Section
